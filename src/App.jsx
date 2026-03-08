@@ -1,9 +1,9 @@
-import React from 'react'
+import CreateNodeForm from "./components/node/CreateNodeForm";
 
 const App = () => {
   return (
     <div>
-      
+      <CreateNodeForm />
     </div>
   )
 }
