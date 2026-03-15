@@ -1,9 +1,10 @@
-import CreateNodeForm from "./components/node/CreateNodeForm";
+import CreateEdgeForm from "./components/edge/CreateEdgeForm";
 
 const App = () => {
   return (
     <div>
-      <CreateNodeForm />
+      <CreateEdgeForm />
+
     </div>
   )
 }
