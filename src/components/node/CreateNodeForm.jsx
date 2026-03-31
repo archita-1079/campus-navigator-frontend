@@ -1,6 +1,7 @@
 import { useGPS } from "../../hooks/useGPS";
 import { useState } from "react";
 import {NODE_TYPES,API_BASE} from "../../utils/constants"
+import axios from "axios";
 
 const CreateNodeForm = ({ onCreated, toast, nodes }) => {
     const gps = useGPS();
@@ -37,15 +38,19 @@ const CreateNodeForm = ({ onCreated, toast, nodes }) => {
                 extraInfo: form.extraInfo || undefined,
                 isAccessible: form.isAccessible
             };
-            const res = await fetch(`${API_BASE}/node`, {
-                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+            
+            const res = await axios.post(`${API_BASE}/node`, body, {
+                headers: {
+                    'Content-Type': 'application/json'
+                }
             });
-            const data = await res.json();
-            if (data.success) {
-                toast.success("Node created — ID: " + data.data.id);
+            if (res.data.success) {
+                toast.success("Node created — ID: " + res.data.data.id);
                 onCreated();
                 setForm({ name: "", nodeType: "BUILDING", latitude: "", longitude: "", floor: "", parentNodeId: "", description: "", extraInfo: "", isAccessible: false });
-            } else toast.error(data.message || "Failed to create node");
+            } else {
+                toast.error(res.data.data.message || "Failed to create node");
+            }
         } catch (e) { toast.error("Network error: " + e.message); }
         setLoading(false);
     };

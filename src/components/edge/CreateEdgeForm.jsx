@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { EDGE_TYPES,API_BASE } from "../../utils/constants";
 import { useGPS } from "../../hooks/useGPS";
-
+import axios from "axios";
 
 function CreateEdgeForm({ onCreated, toast, nodes }) {
   const gps = useGPS();
@@ -52,14 +52,13 @@ function CreateEdgeForm({ onCreated, toast, nodes }) {
         description: form.description || undefined,
         waypoints: waypoints.length > 0 ? waypoints : undefined,
       };
-      const res = await fetch(`${API_BASE}/edge`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      if (data.success) {
-        toast.success("Edge created — ID: " + data.data.id);
+      const res = await axios.post(`${API_BASE}/edge`, body, {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+      if (res.data.success) {
+        toast.success("Edge created — ID: " + res.data.data.id);
         onCreated();
         setForm({
           sourceNodeId: "",
@@ -71,7 +70,7 @@ function CreateEdgeForm({ onCreated, toast, nodes }) {
           description: "",
         });
         setWaypoints([]);
-      } else toast.error(data.message || "Failed to create edge");
+      } else toast.error(res.data.data.message || "Failed to create edge");
     } catch (e) {
       toast.error("Network error: " + e.message);
     }

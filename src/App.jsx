@@ -4,7 +4,8 @@ import NodeList from "./components/node/NodeList";
 import EdgeList from "./components/edge/EdgeList";
 import useToasts from "./hooks/useToasts";
 import { useState, useCallback, useEffect } from "react";
-import { NODE_TYPES } from "./utils/constants";
+import { API_BASE, NODE_TYPES } from "./utils/constants";
+import axios from "axios";
 
 export default function App() {
   const [page, setPage] = useState("dashboard");
@@ -13,15 +14,14 @@ export default function App() {
   const [edges, setEdges] = useState([]);
   const [nodesLoading, setNodesLoading] = useState(false);
   const [edgesLoading, setEdgesLoading] = useState(false);
-  const { toasts } = useToasts();
+  const { toasts, error, success } = useToasts();
   const [gpsStatus, setGpsStatus] = useState(false);
 
   const fetchNodes = useCallback(async () => {
     setNodesLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/node`);
-      const data = await res.json();
-      setNodes(Array.isArray(data) ? data : (data.data ?? []));
+      const res = await axios.get(`${API_BASE}/nodes`);
+      setNodes(res.data.data || []);
     } catch {
       setNodes([]);
     }
@@ -31,9 +31,8 @@ export default function App() {
   const fetchEdges = useCallback(async () => {
     setEdgesLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/edge`);
-      const data = await res.json();
-      setEdges(Array.isArray(data) ? data : (data.data ?? []));
+      const res = await axios.get(`${API_BASE}/edges`);
+      setEdges(res.data.data || []);
     } catch {
       setEdges([]);
     }
@@ -114,13 +113,13 @@ export default function App() {
                   </div>
                   <div className="stat-card">
                     <div className="stat-val">
-                      {nodes.filter((n) => n.accessible).length}
+                      {nodes?.filter((n) => n.accessible).length}
                     </div>
                     <div className="stat-label">Accessible Nodes</div>
                   </div>
                   <div className="stat-card">
                     <div className="stat-val">
-                      {edges.filter((e) => e.bidirectional).length}
+                      {edges?.filter((e) => e.bidirectional).length}
                     </div>
                     <div className="stat-label">Bidirectional Edges</div>
                   </div>
@@ -214,7 +213,7 @@ export default function App() {
                 </div>
                 <CreateNodeForm
                   onCreated={fetchNodes}
-                  toast={toasts}
+                  toast={{ error, success }}
                   nodes={nodes}
                 />
               </>
@@ -230,7 +229,7 @@ export default function App() {
                 </div>
                 <CreateEdgeForm
                   onCreated={fetchEdges}
-                  toast={toasts}
+                  toast={{ error, success }}
                   nodes={nodes}
                 />
               </>
@@ -275,14 +274,6 @@ export default function App() {
               </>
             )}
           </main>
-        </div>
-
-        <div className="toast-wrap">
-          {toasts.map((t) => (
-            <div key={t.id} className={`toast ${t.type}`}>
-              {t.type === "success" ? "✓" : "✕"} {t.msg}
-            </div>
-          ))}
         </div>
       </div>
     </>

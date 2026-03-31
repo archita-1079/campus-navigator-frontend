@@ -426,12 +426,12 @@ body {
 .toast.success {
   background: #0d1f15;
   border-color: var(--success);
-  color: var(--success);
+  color: #ffffff;
 }
 .toast.error {
   background: #1f0d0d;
   border-color: var(--danger);
-  color: var(--danger);
+  color: #ffffff;
 }
 @keyframes slideIn {
   from {
