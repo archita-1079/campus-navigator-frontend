@@ -1,13 +1,165 @@
+import CreateNodeForm from "./components/node/CreateNodeForm";
 import CreateEdgeForm from "./components/edge/CreateEdgeForm";
-import EdgeList from "./components/edge/EdgeList";
 import NodeList from "./components/node/NodeList";
-const App = () => {
+import EdgeList from "./components/edge/EdgeList";
+import useToasts from "./hooks/useToasts";
+import { useState, useCallback, useEffect } from "react";
+import { NODE_TYPES } from "./utils/constants";
+
+export default function App() {
+  const [page, setPage] = useState("dashboard");
+  const [tab, setTab] = useState("nodes");
+  const [nodes, setNodes] = useState([]);
+  const [edges, setEdges] = useState([]);
+  const [nodesLoading, setNodesLoading] = useState(false);
+  const [edgesLoading, setEdgesLoading] = useState(false);
+  const toast = useToasts();
+  const [gpsStatus, setGpsStatus] = useState(false);
+
+  const fetchNodes = useCallback(async () => {
+    console.log("Fetching...");
+  }, []);
+
+  const fetchEdges = useCallback(async () => {
+    console.log("Fetching...");
+  }, []);
+
+  useEffect(() => {
+    fetchNodes();
+    fetchEdges();
+    if (navigator.geolocation) setGpsStatus(true);
+  }, []);
+
+  const navItems = [
+    { id: "dashboard", icon: "◈", label: "Dashboard" },
+    { id: "nodes", icon: "⬡", label: "Nodes" },
+    { id: "edges", icon: "⤢", label: "Edges" },
+    { id: "list", icon: "≡", label: "View All" },
+  ];
+
   return (
-    <div>
-      <EdgeList />
+    <>
+      <div className="app">
+        <header className="header">
+          <div className="header-logo">
+            <div className="header-dot" />
+            Campus Navigator
+          </div>
+          <div className="gps-badge">
+            <div className={`gps-dot${gpsStatus ? "" : " inactive"}`} />
+            {gpsStatus ? "GPS READY" : "GPS UNAVAILABLE"}
+          </div>
+        </header>
 
-    </div>
-  )
+        <div className="layout">
+          <nav className="sidebar">
+            <div className="sidebar-section">
+              <div className="sidebar-label">Navigation</div>
+              {navItems.map(item => (
+                <button key={item.id} className={`nav-item${page === item.id ? " active" : ""}`} onClick={() => setPage(item.id)}>
+                  <span className="nav-icon">{item.icon}</span> {item.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          <main className="main">
+            {page === "dashboard" && (
+              <>
+                <div className="page-header">
+                  <div className="page-title">System Dashboard</div>
+                  <div className="page-subtitle">Campus navigation graph overview</div>
+                </div>
+                <div className="stats-row">
+                  <div className="stat-card">
+                    <div className="stat-val">{nodes.length}</div>
+                    <div className="stat-label">Total Nodes</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-val">{edges.length}</div>
+                    <div className="stat-label">Total Edges</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-val">{nodes.filter(n => n.accessible).length}</div>
+                    <div className="stat-label">Accessible Nodes</div>
+                  </div>
+                  <div className="stat-card">
+                    <div className="stat-val">{edges.filter(e => e.bidirectional).length}</div>
+                    <div className="stat-label">Bidirectional Edges</div>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <div className="card-title">◈ Quick Actions</div>
+                  <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+                    <button className="btn btn-primary" onClick={() => setPage("nodes")}>+ Create Node</button>
+                    <button className="btn btn-secondary" onClick={() => setPage("edges")}>+ Create Edge</button>
+                    <button className="btn btn-secondary" onClick={() => { fetchNodes(); fetchEdges(); }}>↻ Refresh Data</button>
+                  </div>
+                </div>
+
+                <div className="card">
+                  <div className="card-title">◈ Node Type Distribution</div>
+                  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                    {NODE_TYPES.map(t => {
+                      const count = nodes.filter(n => n.nodeType === t).length;
+                      return (
+                        <div key={t} style={{ background: "var(--bg3)", border: "1px solid var(--border2)", borderRadius: "3px", padding: "10px 16px", minWidth: "100px" }}>
+                          <div style={{ fontFamily: "var(--mono)", fontSize: "22px", fontWeight: "600", color: "var(--accent)" }}>{count}</div>
+                          <div style={{ fontFamily: "var(--mono)", fontSize: "10px", color: "var(--text3)", textTransform: "uppercase", marginTop: "2px" }}>{t}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {page === "nodes" && (
+              <>
+                <div className="page-header">
+                  <div className="page-title">Create Node</div>
+                  <div className="page-subtitle">Add a new campus location to the navigation graph</div>
+                </div>
+                <CreateNodeForm onCreated={fetchNodes} toast={toast} nodes={nodes} />
+              </>
+            )}
+
+            {page === "edges" && (
+              <>
+                <div className="page-header">
+                  <div className="page-title">Create Edge</div>
+                  <div className="page-subtitle">Connect two nodes with a navigable path</div>
+                </div>
+                <CreateEdgeForm onCreated={fetchEdges} toast={toast} nodes={nodes} />
+              </>
+            )}
+
+            {page === "list" && (
+              <>
+                <div className="page-header">
+                  <div className="page-title">View All</div>
+                  <div className="page-subtitle">Browse the full navigation graph</div>
+                </div>
+                <div className="section-tabs">
+                  <button className={`tab-btn${tab === "nodes" ? " active" : ""}`} onClick={() => setTab("nodes")}>⬡ Nodes ({nodes.length})</button>
+                  <button className={`tab-btn${tab === "edges" ? " active" : ""}`} onClick={() => setTab("edges")}>⤢ Edges ({edges.length})</button>
+                </div>
+                {tab === "nodes" && <NodeList nodes={nodes} loading={nodesLoading} onRefresh={fetchNodes} />}
+                {tab === "edges" && <EdgeList edges={edges} loading={edgesLoading} onRefresh={fetchEdges} />}
+              </>
+            )}
+          </main>
+        </div>
+
+        <div className="toast-wrap">
+          {toast.toasts.map(t => (
+            <div key={t.id} className={`toast ${t.type}`}>
+              {t.type === "success" ? "✓" : "✕"} {t.msg}
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
 }
-
-export default App
