@@ -1,9 +1,10 @@
 import CreateEdgeForm from "./components/edge/CreateEdgeForm";
+import EdgeList from "./components/edge/EdgeList";
 import NodeList from "./components/node/NodeList";
 const App = () => {
   return (
     <div>
-      <NodeList />
+      <EdgeList />
 
     </div>
   )
