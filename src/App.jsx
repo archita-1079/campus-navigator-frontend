@@ -16,12 +16,24 @@ export default function App() {
   const toast = useToasts();
   const [gpsStatus, setGpsStatus] = useState(false);
 
-  const fetchNodes = useCallback(async () => {
-    console.log("Fetching...");
+ const fetchNodes = useCallback(async () => {
+    setNodesLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/node`);
+      const data = await res.json();
+      setNodes(Array.isArray(data) ? data : (data.data ?? []));
+    } catch { setNodes([]); }
+    setNodesLoading(false);
   }, []);
 
   const fetchEdges = useCallback(async () => {
-    console.log("Fetching...");
+    setEdgesLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/edge`);
+      const data = await res.json();
+      setEdges(Array.isArray(data) ? data : (data.data ?? []));
+    } catch { setEdges([]); }
+    setEdgesLoading(false);
   }, []);
 
   useEffect(() => {
