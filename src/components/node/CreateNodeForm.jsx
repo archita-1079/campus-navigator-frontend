@@ -1,6 +1,6 @@
 import { useGPS } from "../../hooks/useGPS";
 import { useState } from "react";
-import {NODE_TYPES} from "../../utils/constants"
+import {NODE_TYPES,API_BASE} from "../../utils/constants"
 
 const CreateNodeForm = ({ onCreated, toast, nodes }) => {
     const gps = useGPS();

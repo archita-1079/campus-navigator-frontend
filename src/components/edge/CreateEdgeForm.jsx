@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { EDGE_TYPES } from "../../utils/constants";
+import { EDGE_TYPES,API_BASE } from "../../utils/constants";
 import { useGPS } from "../../hooks/useGPS";
 
 
