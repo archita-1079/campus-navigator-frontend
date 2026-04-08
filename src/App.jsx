@@ -6,7 +6,7 @@ import CampusGraph from "./components/CampusGraph";
 import useToasts from "./hooks/useToasts";
 import { useState, useCallback, useEffect } from "react";
 import { Routes, Route, NavLink, useNavigate } from "react-router-dom";
-import { API_BASE, NODE_TYPES } from "./utils/constants";
+import { API_ADMIN_BASE, NODE_TYPES } from "./utils/constants";
 import axios from "axios";
 
 export default function App() {
@@ -22,7 +22,7 @@ export default function App() {
   const fetchNodes = useCallback(async () => {
     setNodesLoading(true);
     try {
-      const res = await axios.get(`${API_BASE}/node`);
+      const res = await axios.get(`${API_ADMIN_BASE}/node`);
       setNodes(res.data.data || []);
     } catch {
       setNodes([]);
@@ -33,7 +33,7 @@ export default function App() {
   const fetchEdges = useCallback(async () => {
     setEdgesLoading(true);
     try {
-      const res = await axios.get(`${API_BASE}/edge`);
+      const res = await axios.get(`${API_ADMIN_BASE}/edge`);
       setEdges(res.data.data || []);
     } catch {
       setEdges([]);

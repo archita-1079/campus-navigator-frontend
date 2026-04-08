@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { EDGE_TYPES,API_BASE } from "../../utils/constants";
+import { EDGE_TYPES,API_ADMIN_BASE } from "../../utils/constants";
 import { useGPS } from "../../hooks/useGPS";
 import axios from "axios";
 
@@ -52,7 +52,7 @@ function CreateEdgeForm({ onCreated, toast, nodes }) {
         description: form.description || undefined,
         waypoints: waypoints.length > 0 ? waypoints : undefined,
       };
-      const res = await axios.post(`${API_BASE}/edge`, body, {
+      const res = await axios.post(`${API_ADMIN_BASE}/edge`, body, {
         headers: {
           'Content-Type': 'application/json'
         }

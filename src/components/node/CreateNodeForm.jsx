@@ -1,6 +1,6 @@
 import { useGPS } from "../../hooks/useGPS";
 import { useState } from "react";
-import {NODE_TYPES,API_BASE} from "../../utils/constants"
+import {NODE_TYPES,API_ADMIN_BASE} from "../../utils/constants"
 import axios from "axios";
 
 const CreateNodeForm = ({ onCreated, toast, nodes }) => {
@@ -39,7 +39,7 @@ const CreateNodeForm = ({ onCreated, toast, nodes }) => {
                 isAccessible: form.isAccessible
             };
             
-            const res = await axios.post(`${API_BASE}/node`, body, {
+            const res = await axios.post(`${API_ADMIN_BASE}/node`, body, {
                 headers: {
                     'Content-Type': 'application/json'
                 }
