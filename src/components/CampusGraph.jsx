@@ -1,206 +1,214 @@
-import { useEffect, useRef, useState } from "react";
-import axios from "axios";
+import React, { useEffect, useRef, useState } from "react";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
+
+import sampleData from "../utils/sampleData";
 import { NODE_CFG, EDGE_CFG } from "../utils/constants";
-import { API_USER_BASE } from "../utils/constants";
-import { flattenNodes, validCoord } from "../utils/graph";
 
-const nodeCfg = (t) => NODE_CFG[t] || NODE_CFG.DEFAULT;
-const edgeCfg = (t) => EDGE_CFG[t] || EDGE_CFG.DEFAULT;
-
-function makeSvgIcon(L, cfg, isChild) {
-  const r = isChild ? 8 : 14;
-  const size = r * 2 + 8;
-
-  const svg = `
-  <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">
-    <circle cx="${size / 2}" cy="${size / 2}" r="${r}" fill="${cfg.bg}" stroke="${cfg.color}" stroke-width="2"/>
-    <text x="${size / 2}" y="${size / 2 + 4}" text-anchor="middle" font-size="12">${cfg.icon}</text>
-  </svg>`;
-
-  return L.divIcon({
-    html: svg,
-    className: "",
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-  });
-}
-
-export default function CampusGraph() {
+function Map3D() {
   const mapRef = useRef(null);
-  const map = useRef(null);
-  const Lref = useRef(null);
-
-  const nodeLayer = useRef(null);
-  const edgeLayer = useRef(null);
-
-  const [graph, setGraph] = useState(null);
-  const [filterType, setFilterType] = useState("ALL");
-  const [showInactive, setShowInactive] = useState(false);
-  const [error, setError] = useState(null);
-
-  async function loadLeaflet() {
-    if (window.L) return window.L;
-
-    await Promise.all([
-      new Promise((res) => {
-        const css = document.createElement("link");
-        css.rel = "stylesheet";
-        css.href =
-          "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css";
-        css.onload = res;
-        document.head.appendChild(css);
-      }),
-      new Promise((res) => {
-        const script = document.createElement("script");
-        script.src =
-          "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js";
-        script.onload = res;
-        document.body.appendChild(script);
-      }),
-    ]);
-
-    return window.L;
-  }
-
-  async function initMap() {
-    const L = await loadLeaflet();
-    Lref.current = L;
-
-    if (map.current) return;
-
-    const m = L.map(mapRef.current, { zoomControl: false });
-
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      maxZoom: 22,
-    }).addTo(m);
-
-    L.control.zoom({ position: "bottomright" }).addTo(m);
-
-    nodeLayer.current = L.layerGroup().addTo(m);
-    edgeLayer.current = L.layerGroup().addTo(m);
-
-    m.setView([20, 78], 4);
-
-    map.current = m;
-  }
+  const mapInstance = useRef(null);
+  const [is3D, setIs3D] = useState(true);
 
   useEffect(() => {
-    initMap();
-    return () => map.current?.remove();
-  }, []);
+    if (mapInstance.current) return;
 
-  useEffect(() => {
-    axios
-      .get(`${API_USER_BASE}/graph`)
-      .then((res) => setGraph(res.data.data))
-      .catch((e) => setError(e.message));
-  }, []);
+    const map = new maplibregl.Map({
+      container: mapRef.current,
+      style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+      center: [78.0035, 30.269],
+      zoom: 17,
+      pitch: 60,
+      bearing: -20,
+    });
 
-  useEffect(() => {
-    const L = Lref.current;
-    const m = map.current;
+    map.addControl(new maplibregl.NavigationControl());
 
-    if (!L || !m || !graph) return;
+    // -------------------------
+    // NORMALIZE TYPES
+    // -------------------------
+    const normalizeNodeType = (type) => {
+      if (["LIBRARY", "LAB", "ADMIN", "AUDITORIUM"].includes(type))
+        return "BUILDING";
 
-    nodeLayer.current.clearLayers();
-    edgeLayer.current.clearLayers();
+      if (["CANTEEN", "SHOP"].includes(type))
+        return "FACILITY";
 
-    const nodes = flattenNodes(graph.nodes);
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+      if (["HOSTEL"].includes(type))
+        return "LANDMARK";
 
-    const bounds = [];
+      if (["GATE", "ENTRANCE"].includes(type))
+        return "ENTRANCE";
 
-    for (const edge of graph.edges || []) {
-      if (!showInactive && !edge.active) continue;
+      if (["JUNCTION"].includes(type))
+        return "JUNCTION";
 
-      const src = nodeMap.get(edge.sourceNodeId);
-      const tgt = nodeMap.get(edge.targetNodeId);
+      if (["PARKING"].includes(type))
+        return "PARKING";
 
-      if (!src || !tgt) continue;
+      return "DEFAULT";
+    };
 
-      if (!validCoord(src.latitude, src.longitude)) continue;
-      if (!validCoord(tgt.latitude, tgt.longitude)) continue;
+    const normalizeEdgeType = (type) => {
+      if (type === "WALKWAY") return "PATHWAY";
+      if (type === "RAMP") return "ACCESSIBLE";
+      return type;
+    };
 
-      const pts = [[src.latitude, src.longitude]];
+    map.on("zoom", () => {
+  const zoom = map.getZoom();
 
-      if (edge.waypoints) {
-        for (const w of edge.waypoints) {
-          if (validCoord(w.latitude, w.longitude)) {
-            pts.push([w.latitude, w.longitude]);
-          }
-        }
-      }
+  document.querySelectorAll(".maplibre-marker").forEach((el) => {
+    if (zoom < 16) {
+      el.style.display = "none"; // hide labels when zoomed out
+    } else {
+      el.style.display = "flex";
+    }
+  });
+});
 
-      pts.push([tgt.latitude, tgt.longitude]);
+    map.on("load", () => {
+      // -------------------------
+      // EDGES
+      // -------------------------
+      const edgeFeatures = sampleData.edges.map((edge) => {
+        const source = sampleData.nodes.find(n => n.id === edge.sourceNodeId);
+        const target = sampleData.nodes.find(n => n.id === edge.targetNodeId);
 
-      const cfg = edgeCfg(edge.edgeType);
-
-      const line = L.polyline(pts, {
-        color: edge.active ? cfg.color : "#444",
-        weight: cfg.weight,
-        dashArray: cfg.dash || null,
+        return {
+          type: "Feature",
+          properties: {
+            edgeType: normalizeEdgeType(edge.edgeType),
+          },
+          geometry: {
+            type: "LineString",
+            coordinates: [
+              [source.longitude, source.latitude],
+              ...edge.waypoints.map(w => [w.longitude, w.latitude]),
+              [target.longitude, target.latitude],
+            ],
+          },
+        };
       });
 
-      line.addTo(edgeLayer.current);
-
-      pts.forEach((p) => bounds.push(p));
-    }
-
-    for (const node of nodes) {
-      if (!validCoord(node.latitude, node.longitude)) continue;
-      if (!showInactive && !node.active) continue;
-      if (filterType !== "ALL" && node.nodeType !== filterType) continue;
-
-      const cfg = nodeCfg(node.nodeType);
-
-      const marker = L.marker([node.latitude, node.longitude], {
-        icon: makeSvgIcon(L, cfg, !!node.parentNodeId),
+      map.addSource("edges", {
+        type: "geojson",
+        data: {
+          type: "FeatureCollection",
+          features: edgeFeatures,
+        },
       });
 
-      marker.bindPopup(
-        `<b>${node.name}</b><br/>${node.nodeType || ""}<br/>${
-          node.accessible ? "♿ Accessible" : ""
-        }`,
-      );
+      map.addLayer({
+        id: "edges-layer",
+        type: "line",
+        source: "edges",
+        paint: {
+          "line-color": [
+            "match",
+            ["get", "edgeType"],
+            "ROAD", EDGE_CFG.ROAD.color,
+            "PATHWAY", EDGE_CFG.PATHWAY.color,
+            "INDOOR", EDGE_CFG.INDOOR.color,
+            "ACCESSIBLE", EDGE_CFG.ACCESSIBLE.color,
+            EDGE_CFG.DEFAULT.color,
+          ],
+          "line-width": [
+            "match",
+            ["get", "edgeType"],
+            "ROAD", EDGE_CFG.ROAD.weight,
+            "PATHWAY", EDGE_CFG.PATHWAY.weight,
+            "INDOOR", EDGE_CFG.INDOOR.weight,
+            "ACCESSIBLE", EDGE_CFG.ACCESSIBLE.weight,
+            EDGE_CFG.DEFAULT.weight,
+          ],
+        },
+      });
 
-      marker.addTo(nodeLayer.current);
+      // -------------------------
+      // NODES (VISUAL + ICONS)
+      // -------------------------
+     sampleData.nodes.forEach((node) => {
+  const type = normalizeNodeType(node.nodeType);
+  const cfg = NODE_CFG[type] || NODE_CFG.DEFAULT;
 
-      bounds.push([node.latitude, node.longitude]);
-    }
+  const el = document.createElement("div");
 
-    if (bounds.length) {
-      m.fitBounds(bounds, { padding: [40, 40], maxZoom: 19 });
-    }
-  }, [graph, filterType, showInactive]);
+  el.style.display = "flex";
+  el.style.alignItems = "center";
+  el.style.gap = "6px";
 
-  const nodes = graph ? flattenNodes(graph.nodes) : [];
-  const nodeTypes = [
-    "ALL",
-    ...new Set(nodes.map((n) => n.nodeType).filter(Boolean)),
-  ];
+  el.style.background = cfg.bg;
+  el.style.color = "#fff";
+  el.style.padding = "6px 10px";
+  el.style.borderRadius = "10px";
+  el.style.border = `2px solid ${cfg.color}`;
+
+  el.style.fontSize = "12px";
+  el.style.fontWeight = "500";
+  el.style.whiteSpace = "nowrap";
+
+  el.style.boxShadow = "0 2px 6px rgba(0,0,0,0.3)";
+
+  // ICON + NAME (always visible)
+  el.innerHTML = `
+    <span>${cfg.icon}</span>
+    <span>${node.name}</span>
+  `;
+
+  new maplibregl.Marker({
+    element: el,
+    anchor: "bottom",
+  })
+    .setLngLat([node.longitude, node.latitude])
+    .addTo(map);
+});
+    });
+
+    mapInstance.current = map;
+  }, []);
+
+  // -------------------------
+  // 2D / 3D SWITCH
+  // -------------------------
+  const toggle3D = () => {
+    const map = mapInstance.current;
+
+    map.easeTo({
+      pitch: is3D ? 0 : 60,
+      bearing: is3D ? 0 : -20,
+      duration: 800,
+    });
+
+    setIs3D(!is3D);
+  };
 
   return (
-    <div style={{ height: "100vh", background: "#0f172a", color: "white" }}>
-      <div style={{ padding: 10 }}>
-        {nodeTypes.map((t) => (
-          <button key={t} onClick={() => setFilterType(t)}>
-            {t}
-          </button>
-        ))}
+    <div style={{ position: "relative" }}>
+      <button
+        onClick={toggle3D}
+        style={{
+          position: "absolute",
+          top: 10,
+          left: 10,
+          zIndex: 10,
+          padding: "8px",
+          background: "#4272eb",
+          color: "#fff",
+        }}
+      >
+       {is3D ? "2D" : "3D"}
+      </button>
 
-        <label style={{ marginLeft: 10 }}>
-          <input
-            type="checkbox"
-            checked={showInactive}
-            onChange={(e) => setShowInactive(e.target.checked)}
-          />
-          inactive
-        </label>
-      </div>
-
-      {error && <div>{error}</div>}
-
-      <div ref={mapRef} style={{ height: "90%" }} />
+      <div
+        ref={mapRef}
+        style={{
+          width: "100%",
+          height: "100vh",
+        }}
+      />
     </div>
   );
 }
+
+export default Map3D;
