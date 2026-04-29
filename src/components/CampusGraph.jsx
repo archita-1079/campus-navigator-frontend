@@ -94,8 +94,9 @@ function CampusGraph() {
     // Only show top-level nodes (no parent) and exclude JUNCTION nodes from map
     const rootNodes = data.nodes.filter(
       (n) =>
-        (n.parentNodeId === null || n.parentNodeId === undefined) &&
-        n.nodeType !== "JUNCTION",
+        // (n.parentNodeId === null || n.parentNodeId === undefined) &&
+        // n.nodeType !== "JUNCTION",
+        n
     );
 
     rootNodes.forEach((node) => {
@@ -168,7 +169,7 @@ function CampusGraph() {
 
     const map = new maplibregl.Map({
       container: mapRef.current,
-      style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+      style: "https://tiles.openfreemap.org/styles/liberty",
       center: [78.0035, 30.269],
       zoom: 17,
       pitch: 60,
@@ -179,6 +180,19 @@ function CampusGraph() {
 
     map.on("load", () => {
       // ── Static graph edges source ──────────────────────────────────────
+      map.addLayer({
+        id: "3d-buildings",
+        source: "openmaptiles",
+        "source-layer": "building",
+        type: "fill-extrusion",
+        minzoom: 15,
+        paint: {
+          "fill-extrusion-color": "#aaa",
+          "fill-extrusion-height": ["get", "render_height"],
+          "fill-extrusion-base": ["get", "render_min_height"],
+          "fill-extrusion-opacity": 0.7,
+        },
+      });
       map.addSource("edges", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -221,10 +235,8 @@ function CampusGraph() {
         paint: { "line-color": "#4285F4", "line-width": 6, "line-opacity": 1 },
       });
 
-      mapLoaded.current = true; // ✅ Signal map is ready
+      mapLoaded.current = true; 
 
-      // ✅ If data already arrived before map loaded, render it now
-      // We read mapData via a ref trick — see below
       if (pendingMapData.current) {
         renderMapData(map, pendingMapData.current);
       }
