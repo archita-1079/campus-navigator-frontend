@@ -1,10 +1,15 @@
-import { useState } from "react";
-import { EDGE_TYPES,API_ADMIN_BASE } from "../../utils/constants";
+import { useState, useEffect } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import { EDGE_TYPES, API_ADMIN_BASE } from "../../utils/constants";
 import { useGPS } from "../../hooks/useGPS";
 import axios from "axios";
 
 function CreateEdgeForm({ onCreated, toast, nodes }) {
   const gps = useGPS();
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const isEditMode = !!id;
+
   const [form, setForm] = useState({
     sourceNodeId: "",
     destinationNodeId: "",
@@ -18,6 +23,46 @@ function CreateEdgeForm({ onCreated, toast, nodes }) {
   const [loading, setLoading] = useState(false);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // Fetch existing edge data if in edit mode
+  useEffect(() => {
+    if (isEditMode) {
+      const fetchEdge = async () => {
+        try {
+          const res = await axios.get(`${API_ADMIN_BASE}/edge/${id}`, {
+            headers: {
+              Authorization: `Bearer ${localStorage.getItem("token")}`,
+            },
+          });
+          if (res.data.success) {
+            const data = res.data.data;
+            setForm({
+              sourceNodeId: data.sourceNodeId || "",
+              destinationNodeId: data.targetNodeId || "", // Depending on your backend response structure
+              edgeType: data.edgeType || "WALKWAY",
+              isAccessible: data.accessible ?? true,
+              isBidirectional: data.bidirectional ?? true,
+              active: data.active ?? true,
+              description: data.description || "",
+            });
+            // Ensure waypoints format matches what the form expects
+            if (data.waypoints) {
+              setWaypoints(
+                data.waypoints.map((wp) => ({
+                  latitude: wp.latitude,
+                  longitude: wp.longitude,
+                  altitude: wp.altitude || null,
+                })),
+              );
+            }
+          }
+        } catch (e) {
+          toast.error("Failed to load edge data.");
+        }
+      };
+      fetchEdge();
+    }
+  }, [id]);
 
   const addWaypointGPS = () => {
     gps.acquire(
@@ -52,25 +97,43 @@ function CreateEdgeForm({ onCreated, toast, nodes }) {
         description: form.description || undefined,
         waypoints: waypoints.length > 0 ? waypoints : undefined,
       };
-      const res = await axios.post(`${API_ADMIN_BASE}/edge`, body, {
+
+      const url = isEditMode
+        ? `${API_ADMIN_BASE}/edge/${id}`
+        : `${API_ADMIN_BASE}/edge`;
+      const method = isEditMode ? "put" : "post";
+
+      const res = await axios[method](url, body, {
         headers: {
-          'Content-Type': 'application/json'
-        }
-      })
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+      });
+
       if (res.data.success) {
-        toast.success("Edge created — ID: " + res.data.data.id);
+        toast.success(
+          `Edge ${isEditMode ? "updated" : "created"} — ID: ${res.data.data.id}`,
+        );
         onCreated();
-        setForm({
-          sourceNodeId: "",
-          destinationNodeId: "",
-          edgeType: "WALKWAY",
-          isAccessible: true,
-          isBidirectional: true,
-          active: true,
-          description: "",
-        });
-        setWaypoints([]);
-      } else toast.error(res.data.data.message || "Failed to create edge");
+        if (isEditMode) {
+          navigate("/list"); // Redirect back to list
+        } else {
+          setForm({
+            sourceNodeId: "",
+            destinationNodeId: "",
+            edgeType: "WALKWAY",
+            isAccessible: true,
+            isBidirectional: true,
+            active: true,
+            description: "",
+          });
+          setWaypoints([]);
+        }
+      } else
+        toast.error(
+          res.data.data.message ||
+            `Failed to ${isEditMode ? "update" : "create"} edge`,
+        );
     } catch (e) {
       toast.error("Network error: " + e.message);
     }
@@ -79,7 +142,7 @@ function CreateEdgeForm({ onCreated, toast, nodes }) {
 
   return (
     <div className="card">
-      <div className="card-title">◈ Create Edge</div>
+      <div className="card-title">◈ {isEditMode ? "Edit" : "Create"} Edge</div>
       <div className="form-grid">
         <div className="form-group">
           <label className="form-label">Source Node *</label>
@@ -199,22 +262,25 @@ function CreateEdgeForm({ onCreated, toast, nodes }) {
         <button
           className="btn btn-secondary"
           onClick={() => {
-            setForm({
-              sourceNodeId: "",
-              destinationNodeId: "",
-              edgeType: "WALKWAY",
-              isAccessible: true,
-              isBidirectional: true,
-              active: true,
-              description: "",
-            });
-            setWaypoints([]);
+            if (isEditMode) navigate("/list");
+            else {
+              setForm({
+                sourceNodeId: "",
+                destinationNodeId: "",
+                edgeType: "WALKWAY",
+                isAccessible: true,
+                isBidirectional: true,
+                active: true,
+                description: "",
+              });
+              setWaypoints([]);
+            }
           }}
         >
-          Reset
+          {isEditMode ? "Cancel" : "Reset"}
         </button>
         <button className="btn btn-primary" onClick={submit} disabled={loading}>
-          {loading ? "Creating..." : "Create Edge"}
+          {loading ? "Saving..." : isEditMode ? "Update Edge" : "Create Edge"}
         </button>
       </div>
     </div>

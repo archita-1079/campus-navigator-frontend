@@ -1,5 +1,7 @@
+import axios from "axios";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import useToasts from "../hooks/useToasts";
 
 export default function Login({ setIsAuthenticated }) {
   const [username, setUsername] = useState("");
@@ -7,15 +9,30 @@ export default function Login({ setIsAuthenticated }) {
   const [error, setError] = useState("");
   const navigate = useNavigate();
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
-    // In future change to real API call
-    if (username === "admin" && password === "admin") {
-      setIsAuthenticated(true);
-      navigate("/dashboard");
-    } else {
+    try {
+      const res = await axios.post(
+        `${import.meta.env.VITE_API_URL}/api/v1/auth/admin/login`,
+        {
+          username,
+          password,
+        },
+      );
+      if (res.data.success) {
+        setIsAuthenticated(true);
+        localStorage.setItem("token", res.data?.data?.token);
+        navigate("/dashboard");
+      } else {
+        console.log("work");
+        
+        setError("Invalid credentials");
+        console.log(error);
+      }
+    } catch (error) {
       setError("Invalid credentials");
     }
+
   };
 
   return (

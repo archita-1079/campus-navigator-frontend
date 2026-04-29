@@ -30,7 +30,11 @@ export default function App() {
   const fetchNodes = useCallback(async () => {
     setNodesLoading(true);
     try {
-      const res = await axios.get(`${API_ADMIN_BASE}/node`);
+      const res = await axios.get(`${API_ADMIN_BASE}/node`, {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+      });
       setNodes(res.data.data || []);
     } catch {
       setNodes([]);
@@ -41,7 +45,11 @@ export default function App() {
   const fetchEdges = useCallback(async () => {
     setEdgesLoading(true);
     try {
-      const res = await axios.get(`${API_ADMIN_BASE}/edge`);
+      const res = await axios.get(`${API_ADMIN_BASE}/edge`, {
+        headers: {
+          Authorization: `Bearer ${localStorage.getItem("token")}`,
+        },
+      });
       setEdges(res.data.data || []);
     } catch {
       setEdges([]);
@@ -53,7 +61,7 @@ export default function App() {
     fetchNodes();
     fetchEdges();
     if (navigator.geolocation) setGpsStatus(true);
-  }, [fetchNodes, fetchEdges]);
+  }, [fetchNodes, fetchEdges, isAuthenticated]);
 
   const handleLogout = () => {
     setIsAuthenticated(false);
@@ -291,6 +299,29 @@ export default function App() {
               />
 
               <Route
+                path="/nodes/edit/:id"
+                element={
+                  isAuthenticated ? (
+                    <>
+                      <div className="page-header">
+                        <div className="page-title">Edit Node</div>
+                        <div className="page-subtitle">
+                          Update an existing campus location
+                        </div>
+                      </div>
+                      <CreateNodeForm
+                        onCreated={fetchNodes}
+                        toast={{ error, success }}
+                        nodes={nodes}
+                      />
+                    </>
+                  ) : (
+                    <Navigate to="/login" replace />
+                  )
+                }
+              />
+
+              <Route
                 path="/edges/create"
                 element={
                   isAuthenticated ? (
@@ -299,6 +330,29 @@ export default function App() {
                         <div className="page-title">Create Edge</div>
                         <div className="page-subtitle">
                           Connect two nodes with a navigable path
+                        </div>
+                      </div>
+                      <CreateEdgeForm
+                        onCreated={fetchEdges}
+                        toast={{ error, success }}
+                        nodes={nodes}
+                      />
+                    </>
+                  ) : (
+                    <Navigate to="/login" replace />
+                  )
+                }
+              />
+
+              <Route
+                path="/edges/edit/:id"
+                element={
+                  isAuthenticated ? (
+                    <>
+                      <div className="page-header">
+                        <div className="page-title">Edit Edge</div>
+                        <div className="page-subtitle">
+                          Update an existing campus path
                         </div>
                       </div>
                       <CreateEdgeForm
