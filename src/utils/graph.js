@@ -19,10 +19,10 @@ export function validCoord(lat, lng) {
 }
 
 // Helper to format room names with their building
-export const getDisplayName = (n) => {
+export const getDisplayName = (n, nodes) => {
   let buildingName = n.parentNode?.name || n.parentName; // Handles embedded object
   if (!buildingName && n.parentNodeId) {
-    const parent = sampleData.nodes.find((node) => node.id === n.parentNodeId);
+    const parent = nodes?.find((node) => node.id === n.parentNodeId);
     if (parent) buildingName = parent.name;
   }
   return buildingName ? `${n.name} (${buildingName})` : n.name;
