@@ -4,160 +4,20 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import axios from "axios";
 import { NODE_CFG } from "../utils/constants";
 import { useGPS } from "../hooks/useGPS";
-import { getDisplayName, getDistanceInMeters } from "../utils/graph";
+import {
+  getDisplayName,
+  getDistanceInMeters,
+  normalizeEdgeType,
+  normalizeNodeType,
+  getBearing,
+  getTurnDirection,
+  buildDirections,
+  buildArrowFeatures,
+  DIR,
+  injectStyles,
+} from "../utils/graph";
 
 const API_USER_BASE = `${import.meta.env.VITE_API_URL}/api/v1/user`;
-
-const normalizeNodeType = (type) => {
-  if (!type) return "DEFAULT";
-  const t = type.toUpperCase();
-  if (["LIBRARY", "LAB", "ADMIN", "AUDITORIUM", "BUILDING"].includes(t))
-    return "BUILDING";
-  if (["CANTEEN", "SHOP"].includes(t)) return "FACILITY";
-  if (["HOSTEL"].includes(t)) return "LANDMARK";
-  if (["GATE", "ENTRANCE"].includes(t)) return "ENTRANCE";
-  return "DEFAULT";
-};
-
-const normalizeEdgeType = (type) => {
-  if (type === "WALKWAY") return "PATHWAY";
-  if (type === "RAMP") return "ACCESSIBLE";
-  return type;
-};
-
-const getBearing = (lat1, lng1, lat2, lng2) => {
-  const toRad = (d) => (d * Math.PI) / 180;
-  const toDeg = (r) => (r * 180) / Math.PI;
-  const dLng = toRad(lng2 - lng1);
-  const phi1 = toRad(lat1),
-    phi2 = toRad(lat2);
-  const y = Math.sin(dLng) * Math.cos(phi2);
-  const x =
-    Math.cos(phi1) * Math.sin(phi2) -
-    Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLng);
-  return (toDeg(Math.atan2(y, x)) + 360) % 360;
-};
-
-const getTurnDirection = (prev, next) => {
-  const diff = ((next - prev + 540) % 360) - 180;
-  if (Math.abs(diff) < 22) return "straight";
-  if (diff > 0 && diff <= 135) return "right";
-  if (diff < 0 && diff >= -135) return "left";
-  return "u-turn";
-};
-
-const buildDirections = (coords) => {
-  if (coords.length < 2) return [];
-  const steps = [];
-  let segStart = 0;
-  let segBearing = getBearing(
-    coords[0][1],
-    coords[0][0],
-    coords[1][1],
-    coords[1][0],
-  );
-  let segDist = 0;
-
-  for (let i = 0; i < coords.length - 1; i++) {
-    segDist += getDistanceInMeters(
-      coords[i][1],
-      coords[i][0],
-      coords[i + 1][1],
-      coords[i + 1][0],
-    );
-    const isLast = i === coords.length - 2;
-    if (isLast) {
-      steps.push({
-        type: "arrive",
-        bearing: segBearing,
-        distance: Math.round(segDist),
-        coordIndex: segStart,
-      });
-      break;
-    }
-    const nextBearing = getBearing(
-      coords[i + 1][1],
-      coords[i + 1][0],
-      coords[i + 2][1],
-      coords[i + 2][0],
-    );
-    const turn = getTurnDirection(segBearing, nextBearing);
-    if (turn !== "straight") {
-      steps.push({
-        type: turn,
-        bearing: segBearing,
-        distance: Math.round(segDist),
-        coordIndex: segStart,
-      });
-      segStart = i + 1;
-      segBearing = nextBearing;
-      segDist = 0;
-    }
-  }
-  return steps;
-};
-
-const buildArrowFeatures = (coordsArray, intervalM = 18) => {
-  const features = [];
-  let distAccum = 0;
-  for (let i = 0; i < coordsArray.length - 1; i++) {
-    const [lng1, lat1] = coordsArray[i];
-    const [lng2, lat2] = coordsArray[i + 1];
-    const segDist = getDistanceInMeters(lat1, lng1, lat2, lng2);
-    const bearing = getBearing(lat1, lng1, lat2, lng2);
-    let offset = intervalM - (distAccum % intervalM);
-    while (offset <= segDist) {
-      const frac = offset / segDist;
-      features.push({
-        type: "Feature",
-        geometry: {
-          type: "Point",
-          coordinates: [
-            lng1 + (lng2 - lng1) * frac,
-            lat1 + (lat2 - lat1) * frac,
-          ],
-        },
-        properties: { bearing },
-      });
-      offset += intervalM;
-    }
-    distAccum += segDist;
-  }
-  return features;
-};
-
-const DIR = {
-  straight: { icon: "↑", label: "Continue straight", color: "#4285F4" },
-  right: { icon: "→", label: "Turn right", color: "#FBBC05" },
-  left: { icon: "←", label: "Turn left", color: "#FBBC05" },
-  "u-turn": { icon: "↩", label: "Make a U-turn", color: "#EA4335" },
-  arrive: { icon: "🏁", label: "You have arrived", color: "#34A853" },
-};
-
-const injectStyles = () => {
-  if (document.getElementById("campus-nav-styles")) return;
-  const s = document.createElement("style");
-  s.id = "campus-nav-styles";
-  s.textContent = `
-    @keyframes gpsPulse {
-      0%  { transform:scale(1);  opacity:0.85; }
-      70% { transform:scale(3);  opacity:0;    }
-      100%{ transform:scale(3);  opacity:0;    }
-    }
-    @keyframes dirSlide {
-      from { opacity:0; transform:translateX(-50%) translateY(-10px); }
-      to   { opacity:1; transform:translateX(-50%) translateY(0);     }
-    }
-    @keyframes arrivalPop {
-      0%  { transform:translate(-50%,-50%) scale(0.85); opacity:0; }
-      70% { transform:translate(-50%,-50%) scale(1.04); }
-      100%{ transform:translate(-50%,-50%) scale(1);    opacity:1; }
-    }
-    .cnav-btn { transition: filter 0.2s; }
-    .cnav-btn:hover { filter: brightness(1.18); }
-  `;
-  document.head.appendChild(s);
-};
 
 export default function CampusGraph() {
   const mapRef = useRef(null);
@@ -300,7 +160,6 @@ export default function CampusGraph() {
     mapInstance.current = map;
   }, []);
 
-  // ── Render graph data ─────────────────────────────────────────────────────
   const renderMapData = useCallback((map, data) => {
     if (!map || !data?.nodes?.length) return;
 
@@ -344,7 +203,7 @@ export default function CampusGraph() {
           "AUDITORIUM",
           "CLASSROOM",
           "LECTURE_HALL",
-          "OTHER"
+          "OTHER",
         ].includes(n.nodeType?.toUpperCase()),
       )
       .forEach((node) => {
@@ -441,7 +300,6 @@ export default function CampusGraph() {
       userMarkerRef.current.setLngLat([coords.lng, coords.lat]);
     }
 
-    // Accuracy halo
     if (map.getSource("accuracy-src")) {
       map.getSource("accuracy-src").setData({
         type: "FeatureCollection",
@@ -1249,7 +1107,7 @@ export default function CampusGraph() {
         </div>
       )}
 
-      {/* Steps list toggle */}
+      {/* Steps list  */}
       {navigating && directions.length > 0 && !arrived && (
         <>
           <button

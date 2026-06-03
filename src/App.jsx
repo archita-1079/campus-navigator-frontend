@@ -102,7 +102,7 @@ export default function App() {
         <header className="header">
           <div className="header-logo">
             <div className="header-dot" />
-            Campus Navigator
+            Way Finder
           </div>
           <div className="gps-badge">
             <div className={`gps-dot${gpsStatus ? "" : " inactive"}`} />

@@ -36,7 +36,7 @@ function NodeList({ nodes, loading, onRefresh }) {
                 <th>Parent</th>
                 <th>Accessible</th>
                 <th>Active</th>
-                <th>Actions</th>
+                {/* <th>Actions</th> */}
               </tr>
             </thead>
             <tbody>
@@ -98,7 +98,7 @@ function NodeList({ nodes, loading, onRefresh }) {
                         {n.active ? "YES" : "NO"}
                       </span>
                     </td>
-                    <td>
+                    {/* <td>
                       <div style={{ display: "flex", gap: "8px" }}>
                         <button
                           style={{
@@ -115,7 +115,7 @@ function NodeList({ nodes, loading, onRefresh }) {
                           Edit
                         </button>
                       </div>
-                    </td>
+                    </td> */}
                   </tr>
                 ))
               )}

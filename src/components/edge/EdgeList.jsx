@@ -37,7 +37,7 @@ function EdgeList({ edges, loading, onRefresh }) {
                 <th>Bidir</th>
                 <th>Accessible</th>
                 <th>Active</th>
-                <th>Actions</th>
+                {/* <th>Actions</th> */}
               </tr>
             </thead>
             <tbody>
@@ -100,7 +100,7 @@ function EdgeList({ edges, loading, onRefresh }) {
                     </td>
                     <td>
                       <div style={{ display: "flex", gap: "8px" }}>
-                        <button
+                        {/* <button
                           style={{
                             background: "#4285F4",
                             color: "white",
@@ -113,7 +113,7 @@ function EdgeList({ edges, loading, onRefresh }) {
                           onClick={() => navigate(`/edges/edit/${e.id}`)}
                         >
                           Edit
-                        </button>
+                        </button> */}
                       </div>
                     </td>
                   </tr>
