@@ -174,6 +174,7 @@ export default function CampusGraph() {
     );
 
     map.on("load", () => {
+      // Accuracy circle – uses a fixed 20 m radius proxy via circle-radius stops
       map.addSource("accuracy-src", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -187,9 +188,18 @@ export default function CampusGraph() {
           "circle-stroke-color": "rgba(66,133,244,0.45)",
           "circle-stroke-width": 1.5,
           "circle-pitch-alignment": "map",
-          "circle-radius": { stops: [[14, 8], [16, 20], [18, 80], [20, 320]] },
+          // approximate 20 m radius in pixels per zoom
+          "circle-radius": {
+            stops: [
+              [14, 8],
+              [16, 20],
+              [18, 80],
+              [20, 320],
+            ],
+          },
         },
       });
+
 
       map.addSource("heading-src", {
         type: "geojson",
@@ -275,7 +285,6 @@ export default function CampusGraph() {
       if (pendingData.current) renderMapData(map, pendingData.current);
     });
 
-    // Disable auto-follow on manual pan; re-enable 4 s after the user lifts finger
     map.on("dragstart", () => {
       autoFollowRef.current = false;
       if (reFollowTimerRef.current) clearTimeout(reFollowTimerRef.current);
@@ -368,7 +377,6 @@ export default function CampusGraph() {
       .catch((e) => console.error("Graph fetch failed:", e));
   }, []);
 
-  // ── Build heading-cone GeoJSON triangle ───────────────────────────────────
   const buildHeadingCone = useCallback((lat, lng, headingDeg) => {
     if (headingDeg == null) return { type: "FeatureCollection", features: [] };
     const R = 0.00015;
@@ -391,7 +399,6 @@ export default function CampusGraph() {
     };
   }, []);
 
-  // ── Update user GPS marker + heading cone ─────────────────────────────────
   useEffect(() => {
     const map = mapInstance.current;
     if (!map || !coords) return;
@@ -425,13 +432,11 @@ export default function CampusGraph() {
     }
   }, [coords, compassHeading, effectiveHeading, buildHeadingCone]);
 
-  // ── NEW: Reroute helper ────────────────────────────────────────────────────
-  // Called when the user goes off-route. Finds nearest graph node to current
-  // GPS position and requests a fresh shortest-path to the destination.
+
   const triggerReroute = useCallback(async (currentCoords) => {
-    if (isReroutingRef.current) return;                    // already in progress
+    if (isReroutingRef.current) return;                    
     const now = Date.now();
-    if (now - lastRerouteTimeRef.current < 5000) return;  // debounce 5 s
+    if (now - lastRerouteTimeRef.current < 5000) return;  
     const dest = selectedDestRef.current;
     if (!dest) return;
 
