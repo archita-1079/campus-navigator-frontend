@@ -253,7 +253,17 @@ export default function CampusGraph() {
         paint: { "line-color": "#1a56c4", "line-width": 13, "line-opacity": 0.85 } });
       map.addLayer({ id: "route-fill", type: "line", source: "route-src",
         layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#4285F4", "line-width": 7, "line-opacity": 1 } });
+        paint: { "line-color": "#4285F4", "line-width": 7, "line-opacity": 1 }
+      });
+      
+      // Ghost of the original route shown while rerouting
+addSrc("route-ghost-src");
+map.addLayer({ id: "route-ghost-casing", type: "line", source: "route-ghost-src",
+  layout: { "line-join": "round", "line-cap": "round" },
+  paint: { "line-color": "#555", "line-width": 13, "line-opacity": 0, "line-blur": 2 } });
+map.addLayer({ id: "route-ghost-fill", type: "line", source: "route-ghost-src",
+  layout: { "line-join": "round", "line-cap": "round" },
+  paint: { "line-color": "#888", "line-width": 7, "line-opacity": 0 } });
 
       addSrc("arrows-src");
       map.addLayer({ id: "route-arrows", type: "symbol", source: "arrows-src",
@@ -401,68 +411,124 @@ export default function CampusGraph() {
 
   // ── Reroute ───────────────────────────────────────────────────────────────
   // Cooldown is 2 s (down from 5 s) so the app reacts quickly after a wrong turn.
-  const triggerReroute = useCallback(async (currentCoords) => {
-    if (isReroutingRef.current) return;
-    const now = Date.now();
-    if (now - lastRerouteTimeRef.current < REROUTE_COOLDOWN_MS) return;
-    const dest = selectedDestRef.current;
-    if (!dest) return;
-    const data = mapDataRef.current;
-    if (!data?.nodes?.length) return;
+ const triggerReroute = useCallback(async (currentCoords) => {
+  if (isReroutingRef.current) return;
+  const now = Date.now();
+  if (now - lastRerouteTimeRef.current < 5000) return;
+  const dest = selectedDestRef.current;
+  if (!dest) return;
+  const data = mapDataRef.current;
+  if (!data?.nodes?.length) return;
 
-    let minD = Infinity, nearestNode = null;
-    data.nodes.forEach((n) => {
-      const d = getDistanceInMeters(currentCoords.lat, currentCoords.lng, n.latitude, n.longitude);
-      if (d < minD) { minD = d; nearestNode = n; }
+  let minD = Infinity, nearestNode = null;
+  data.nodes.forEach((n) => {
+    const d = getDistanceInMeters(currentCoords.lat, currentCoords.lng, n.latitude, n.longitude);
+    if (d < minD) { minD = d; nearestNode = n; }
+  });
+  if (!nearestNode) return;
+
+  isReroutingRef.current = true;
+  lastRerouteTimeRef.current = now;
+  setIsRerouting(true);
+
+  const map = mapInstance.current;
+
+  // ── Step 1: Ghost the current route immediately ───────────────────────────
+  // Copy the existing blue route into the ghost layer, fade it to grey,
+  // and clear the main route — this is the Google Maps "fading original path"
+  const existingRoute = routeCoordsRef.current;
+  if (map && existingRoute.length > 1) {
+    map.getSource("route-ghost-src")?.setData({
+      type: "FeatureCollection",
+      features: [{ type: "Feature", geometry: { type: "LineString", coordinates: existingRoute } }],
     });
-    if (!nearestNode) return;
+    // Fade ghost in
+    map.setPaintProperty("route-ghost-casing", "line-opacity", 0.5);
+    map.setPaintProperty("route-ghost-fill",   "line-opacity", 0.35);
+    // Clear the main blue route while rerouting
+    map.getSource("route-src")?.setData({ type: "FeatureCollection", features: [] });
+    map.getSource("arrows-src")?.setData({ type: "FeatureCollection", features: [] });
+  }
 
-    isReroutingRef.current = true;
-    lastRerouteTimeRef.current = now;
-    setIsRerouting(true);
+  try {
+    const res   = await axios.get(`${API_USER_BASE}/graph/shortest-path/${nearestNode.id}/${dest.id}`);
+    const edges = res.data.data || [];
+    let arr     = edgesToCoords(edges, data.nodes);
 
-    try {
-      const res   = await axios.get(`${API_USER_BASE}/graph/shortest-path/${nearestNode.id}/${dest.id}`);
-      const edges = res.data.data || [];
-      let arr     = edgesToCoords(edges, data.nodes);
-
-      if (arr.length === 0) {
-        try { arr = await fetchOSRMRoute(nearestNode, dest); }
-        catch (e) { console.warn("OSRM fallback failed", e); return; }
-      }
-
-      // Prepend the user's exact live position so the route line starts from them.
-      // This also means the very first segment will show a u-turn if they're
-      // facing the wrong way — which is the correct instruction.
-      arr.unshift([currentCoords.lng, currentCoords.lat]);
-      if (arr.length < 2) return;
-
-      let total = 0;
-      for (let i = 0; i < arr.length - 1; i++)
-        total += getDistanceInMeters(arr[i][1], arr[i][0], arr[i+1][1], arr[i+1][0]);
-
-      // allowUTurn=true because we just prepended the live GPS position,
-      // so the new first segment may genuinely require turning around.
-      const built = buildDirections(arr, true);
-      setRouteCoords(arr);  routeCoordsRef.current = arr;
-      setDirections(built); directionsRef.current  = built;
-      setTravelledIdx(0); setStepIdx(0); stepIdxRef.current = 0; setDistToNextTurn(null);
-      setRouteInfo({ distance: Math.round(total), time: Math.max(1, Math.ceil(total / 1.4 / 60)) });
-
-      const map = mapInstance.current;
-      if (map) {
-        map.getSource("route-travelled")?.setData({ type: "FeatureCollection", features: [] });
-        map.getSource("route-src")?.setData({ type: "FeatureCollection",
-          features: [{ type: "Feature", geometry: { type: "LineString", coordinates: arr } }] });
-        map.getSource("arrows-src")?.setData({ type: "FeatureCollection", features: buildArrowFeatures(arr) });
-      }
-    } catch (e) {
-      console.error("Reroute failed:", e);
-    } finally {
-      isReroutingRef.current = false;
-      setIsRerouting(false);
+    if (arr.length === 0) {
+      try { arr = await fetchOSRMRoute(nearestNode, dest); }
+      catch (e) { console.warn("OSRM fallback failed", e); return; }
     }
-  }, []);
+
+    // Prepend GPS so the new route starts exactly from the user's dot
+    arr.unshift([currentCoords.lng, currentCoords.lat]);
+    if (arr.length < 2) return;
+
+    let total = 0;
+    for (let i = 0; i < arr.length - 1; i++)
+      total += getDistanceInMeters(arr[i][1], arr[i][0], arr[i+1][1], arr[i+1][0]);
+
+    const built = buildDirections(arr);
+    setRouteCoords(arr);       routeCoordsRef.current  = arr;
+    setDirections(built);      directionsRef.current   = built;
+    setTravelledIdx(0); setStepIdx(0); stepIdxRef.current = 0; setDistToNextTurn(null);
+    setRouteInfo({ distance: Math.round(total), time: Math.max(1, Math.ceil(total / 1.4 / 60)) });
+
+    if (map) {
+      // ── Step 2: Snap new route in, fade ghost out ─────────────────────────
+      map.getSource("route-travelled")?.setData({ type: "FeatureCollection", features: [] });
+
+      // Draw the new rerouted path
+      map.getSource("route-src")?.setData({
+        type: "FeatureCollection",
+        features: [{ type: "Feature", geometry: { type: "LineString", coordinates: arr } }],
+      });
+      map.getSource("arrows-src")?.setData({
+        type: "FeatureCollection",
+        features: buildArrowFeatures(arr),
+      });
+
+      // Fade ghost out over 600ms — mimics Google Maps ghost dissolve
+      map.setPaintProperty("route-ghost-casing", "line-opacity", 0);
+      map.setPaintProperty("route-ghost-fill",   "line-opacity", 0);
+
+      // Clear ghost data after the fade transition completes
+      setTimeout(() => {
+        map.getSource("route-ghost-src")?.setData({ type: "FeatureCollection", features: [] });
+      }, 700);
+
+      // ── Step 3: Ease map to show the start of the new route ───────────────
+      // Pan to the first meaningful turn so the user sees where to go
+      if (built.length > 0 && arr[built[0]?.coordIndex ?? 1]) {
+        const firstTurnCoord = arr[Math.min(built[0]?.coordIndex ?? 1, arr.length - 1)];
+        const initialBearing = getBearing(
+          arr[0][1], arr[0][0],
+          firstTurnCoord[1], firstTurnCoord[0],
+        );
+        map.easeTo({
+          center: [currentCoords.lng, currentCoords.lat],
+          bearing: initialBearing,
+          zoom: 18.5,
+          pitch: 45,
+          duration: 800,
+        });
+      }
+    }
+  } catch (e) {
+    console.error("Reroute failed:", e);
+    // Restore the original route visually if reroute failed
+    if (map && existingRoute.length > 1) {
+      map.getSource("route-src")?.setData({
+        type: "FeatureCollection",
+        features: [{ type: "Feature", geometry: { type: "LineString", coordinates: existingRoute } }],
+      });
+      map.getSource("route-ghost-src")?.setData({ type: "FeatureCollection", features: [] });
+    }
+  } finally {
+    isReroutingRef.current = false;
+    setIsRerouting(false);
+  }
+}, []);
 
   // ── Navigation tracking — runs every GPS tick (≈1 s) ─────────────────────
   useEffect(() => {
@@ -691,6 +757,10 @@ export default function CampusGraph() {
     isReroutingRef.current = false; lastRerouteTimeRef.current = 0;
     autoFollowRef.current  = false; setPreviewCollapsed(false);
     setIsPreviewMode(false); setShowStepsPanel(false); setDistToNextTurn(null);
+    // inside clearRoute, add to the map.getSource cleanup block:
+map.getSource("route-ghost-src")?.setData({ type: "FeatureCollection", features: [] });
+map.setPaintProperty("route-ghost-casing", "line-opacity", 0);
+map.setPaintProperty("route-ghost-fill",   "line-opacity", 0);
     if (searchPinRef.current) { searchPinRef.current.remove(); searchPinRef.current = null; }
     const map = mapInstance.current;
     if (map) {
