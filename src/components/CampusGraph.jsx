@@ -17,7 +17,7 @@ import {
 } from "../utils/graph";
 
 const API_USER_BASE = `${import.meta.env.VITE_API_URL}/api/v1/user`;
-const OFF_ROUTE_THRESHOLD_M = 20;
+const OFF_ROUTE_THRESHOLD_M = 35;
 
 // ─── OSRM fallback (only when campus graph returns no edges) ──────────────────
 const OSRM_BASE = "https://router.project-osrm.org/route/v1/foot";
@@ -118,8 +118,10 @@ export default function CampusGraph() {
   // ── mode flags ────────────────────────────────────────────────────────────
   // isPreviewMode = true  → source was manually picked (≠ GPS node)
   //                false → source == GPS nearest node → navigation available
-  const [isPreviewMode,  setIsPreviewMode]  = useState(false);
-  const [showStepsPanel, setShowStepsPanel] = useState(false);
+  const [isPreviewMode,   setIsPreviewMode]   = useState(false);
+  const [showStepsPanel,  setShowStepsPanel]  = useState(false);
+  // Live metres from user to the next turn point — updates every GPS tick
+  const [distToNextTurn,  setDistToNextTurn]  = useState(null);
 
   // keep refs in sync
   useEffect(() => { routeCoordsRef.current = routeCoords;  }, [routeCoords]);
@@ -199,18 +201,9 @@ export default function CampusGraph() {
         paint: { "line-color": "#666", "line-width": 1.5, "line-opacity": 0.35 } });
 
       addSrc("route-travelled");
-     map.addLayer({
-  id: "route-travelled-layer",
-  type: "line",
-  source: "route-travelled",
-  layout: { "line-join": "round", "line-cap": "round" },
-  paint: {
-    "line-color": "#aaaaaa",
-    "line-width": 7,
-    "line-opacity": 0.55,
-    "line-blur": 1,
-  },
-});
+      map.addLayer({ id: "route-travelled-layer", type: "line", source: "route-travelled",
+        layout: { "line-join": "round", "line-cap": "round" },
+        paint: { "line-color": "#aaaaaa", "line-width": 7, "line-opacity": 0.55, "line-blur": 1 } });
 
       addSrc("route-src");
       map.addLayer({ id: "route-casing", type: "line", source: "route-src",
@@ -305,39 +298,67 @@ export default function CampusGraph() {
       .catch((e) => console.error("Graph fetch failed:", e));
   }, []);
 
-  // ── Heading cone ──────────────────────────────────────────────────────────
-  const buildHeadingCone = useCallback((lat, lng, h) => {
-    if (h == null) return { type: "FeatureCollection", features: [] };
-    const R = 0.00015, sp = 30, toR = (d) => (d * Math.PI) / 180;
-    return { type: "FeatureCollection", features: [{ type: "Feature", properties: {},
+ // ── Heading cone — memoised, only recomputes when heading actually changes ──
+const buildHeadingCone = useCallback((lat, lng, h) => {
+  if (h == null) return { type: "FeatureCollection", features: [] };
+  const R = 0.00015, sp = 30, toR = (d) => (d * Math.PI) / 180;
+  return {
+    type: "FeatureCollection",
+    features: [{ type: "Feature", properties: {},
       geometry: { type: "Polygon", coordinates: [[[lng, lat],
         [lng + R * Math.sin(toR(h - sp)), lat + R * Math.cos(toR(h - sp))],
         [lng + R * Math.sin(toR(h + sp)), lat + R * Math.cos(toR(h + sp))],
-        [lng, lat]]] } }] };
-  }, []);
+        [lng, lat]]] } }]
+  };
+}, []); // no deps — pure math, stable reference forever
 
-  // ── GPS dot ───────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const map = mapInstance.current;
-    if (!map || !coords) return;
-    if (!userMarkerRef.current) {
-      const wrap = document.createElement("div");
-      wrap.style.cssText = "position:relative;width:22px;height:22px;pointer-events:none;";
-      const pulse = document.createElement("div");
-      pulse.style.cssText = "position:absolute;inset:0;background:rgba(66,133,244,0.35);border-radius:50%;animation:gpsPulse 2s ease-out infinite;";
-      const dot = document.createElement("div");
-      dot.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;background:#4285F4;border:2.5px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(66,133,244,0.9);";
-      wrap.appendChild(pulse); wrap.appendChild(dot);
-      userMarkerRef.current = new maplibregl.Marker({ element: wrap, anchor: "center" })
-        .setLngLat([coords.lng, coords.lat]).addTo(map);
-    } else {
-      userMarkerRef.current.setLngLat([coords.lng, coords.lat]);
-    }
-    map.getSource("accuracy-src")?.setData({ type: "FeatureCollection", features: [{
-      type: "Feature", geometry: { type: "Point", coordinates: [coords.lng, coords.lat] }, properties: {}
-    }]});
-    map.getSource("heading-src")?.setData(buildHeadingCone(coords.lat, coords.lng, effectiveHeading()));
-  }, [coords, compassHeading, effectiveHeading, buildHeadingCone]);
+ // ── GPS dot + heading cone — only repaints when position or heading changes ──
+const prevHeadingRef = useRef(null);
+const prevLatRef     = useRef(null);
+const prevLngRef     = useRef(null);
+
+useEffect(() => {
+  const map = mapInstance.current;
+  if (!map || !coords) return;
+
+  // Always update marker position
+  if (!userMarkerRef.current) {
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "position:relative;width:22px;height:22px;pointer-events:none;";
+    const pulse = document.createElement("div");
+    pulse.style.cssText = "position:absolute;inset:0;background:rgba(66,133,244,0.35);border-radius:50%;animation:gpsPulse 2s ease-out infinite;";
+    const dot = document.createElement("div");
+    dot.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;background:#4285F4;border:2.5px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(66,133,244,0.9);";
+    wrap.appendChild(pulse); wrap.appendChild(dot);
+    userMarkerRef.current = new maplibregl.Marker({ element: wrap, anchor: "center" })
+      .setLngLat([coords.lng, coords.lat]).addTo(map);
+  } else {
+    userMarkerRef.current.setLngLat([coords.lng, coords.lat]);
+  }
+
+  // Accuracy circle — update every tick (cheap, no visual flicker)
+  map.getSource("accuracy-src")?.setData({ type: "FeatureCollection", features: [{
+    type: "Feature", geometry: { type: "Point", coordinates: [coords.lng, coords.lat] }, properties: {}
+  }]});
+
+  // Heading cone — only update if heading or position changed meaningfully
+  const hdg = coords.speed != null && coords.speed > 0.5 && coords.heading != null
+    ? coords.heading
+    : compassHeading;
+
+  const latChanged = Math.abs((prevLatRef.current ?? 0) - coords.lat) > 0.000001;
+  const lngChanged = Math.abs((prevLngRef.current ?? 0) - coords.lng) > 0.000001;
+  const hdgChanged = hdg == null
+    ? prevHeadingRef.current != null
+    : Math.abs(((hdg - (prevHeadingRef.current ?? hdg) + 540) % 360) - 180) > 2; // >2° change
+
+  if (latChanged || lngChanged || hdgChanged) {
+    map.getSource("heading-src")?.setData(buildHeadingCone(coords.lat, coords.lng, hdg));
+    prevLatRef.current     = coords.lat;
+    prevLngRef.current     = coords.lng;
+    prevHeadingRef.current = hdg;
+  }
+}, [coords, compassHeading, buildHeadingCone]);
 
   // ── Reroute (campus edges first, OSRM if empty) ───────────────────────────
   const triggerReroute = useCallback(async (currentCoords) => {
@@ -380,7 +401,7 @@ export default function CampusGraph() {
       const built = buildDirections(arr);
       setRouteCoords(arr);  routeCoordsRef.current = arr;
       setDirections(built); directionsRef.current  = built;
-      setTravelledIdx(0); setStepIdx(0); stepIdxRef.current = 0;
+      setTravelledIdx(0); setStepIdx(0); stepIdxRef.current = 0; setDistToNextTurn(null);
       setRouteInfo({ distance: Math.round(total), time: Math.max(1, Math.ceil(total / 1.4 / 60)) });
 
       const map = mapInstance.current;
@@ -414,14 +435,8 @@ export default function CampusGraph() {
     setTravelledIdx(closestIdx);
     if (minD > OFF_ROUTE_THRESHOLD_M) triggerReroute(coords);
 
-   const remaining = [[coords.lng, coords.lat], ...rc.slice(closestIdx)];
-
-// Only grey the portion the user has actually walked through —
-// trim the tail so it ends at the user's current position
-const travelledRaw = rc.slice(0, closestIdx + 1);
-const travelled = travelledRaw.length > 0
-  ? [...travelledRaw, [coords.lng, coords.lat]]
-  : [];
+    const remaining = [[coords.lng, coords.lat], ...rc.slice(closestIdx)];
+    const travelled = [...rc.slice(0, closestIdx + 1), [coords.lng, coords.lat]];
 
     let remMeters = 0;
     for (let i = 0; i < remaining.length - 1; i++)
@@ -436,7 +451,7 @@ const travelled = travelledRaw.length > 0
 
     if (remMeters < 12) { setArrived(true); return; }
 
-    // ── Update active step ────────────────────────────────────────────────
+    // ── Update active step + live distance to next turn ───────────────────
     const dirs = directionsRef.current;
     if (dirs.length > 0) {
       let ai = 0;
@@ -446,6 +461,23 @@ const travelled = travelledRaw.length > 0
       if (ai !== stepIdxRef.current) {
         setStepIdx(ai);
         stepIdxRef.current = ai;
+      }
+
+      // Walk along route coords from closestIdx → next turn's coordIndex
+      // to get the true path distance (not straight-line) to the upcoming turn
+      const nextTurnStep = dirs[ai + 1];
+      if (nextTurnStep && rc[nextTurnStep.coordIndex]) {
+        let d = getDistanceInMeters(
+          coords.lat, coords.lng,
+          rc[closestIdx][1], rc[closestIdx][0],
+        );
+        for (let i = closestIdx; i < nextTurnStep.coordIndex && i < rc.length - 1; i++) {
+          d += getDistanceInMeters(rc[i][1], rc[i][0], rc[i+1][1], rc[i+1][0]);
+        }
+        setDistToNextTurn(Math.round(d));
+      } else {
+        // On the final leg — no upcoming turn, clear the counter
+        setDistToNextTurn(null);
       }
     }
 
@@ -621,7 +653,7 @@ const travelled = travelledRaw.length > 0
     setRouteInfo(null); setArrived(false); setIsRerouting(false);
     isReroutingRef.current = false; lastRerouteTimeRef.current = 0;
     autoFollowRef.current  = false; setPreviewCollapsed(false);
-    setIsPreviewMode(false); setShowStepsPanel(false);
+    setIsPreviewMode(false); setShowStepsPanel(false); setDistToNextTurn(null);
     if (searchPinRef.current) { searchPinRef.current.remove(); searchPinRef.current = null; }
     const map = mapInstance.current;
     if (map) {
@@ -793,8 +825,8 @@ const travelled = travelledRaw.length > 0
             justifyContent: "center", fontSize: 26, flexShrink: 0 }}>{dirInfo.icon}</div>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 16, fontWeight: 700, color: dirInfo.color }}>{dirInfo.label}</div>
-            {activeStep?.distance > 0 && (
-              <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>in {activeStep.distance} m</div>
+            {distToNextTurn != null && distToNextTurn > 0 && (
+              <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>in {distToNextTurn} m</div>
             )}
           </div>
           <div style={{ fontSize: 10, color: "#555" }}>{stepIdx + 1} / {directions.length}</div>
