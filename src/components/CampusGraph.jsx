@@ -199,9 +199,18 @@ export default function CampusGraph() {
         paint: { "line-color": "#666", "line-width": 1.5, "line-opacity": 0.35 } });
 
       addSrc("route-travelled");
-      map.addLayer({ id: "route-travelled-layer", type: "line", source: "route-travelled",
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#888", "line-width": 7, "line-opacity": 0.6 } });
+     map.addLayer({
+  id: "route-travelled-layer",
+  type: "line",
+  source: "route-travelled",
+  layout: { "line-join": "round", "line-cap": "round" },
+  paint: {
+    "line-color": "#aaaaaa",
+    "line-width": 7,
+    "line-opacity": 0.55,
+    "line-blur": 1,
+  },
+});
 
       addSrc("route-src");
       map.addLayer({ id: "route-casing", type: "line", source: "route-src",
@@ -405,8 +414,14 @@ export default function CampusGraph() {
     setTravelledIdx(closestIdx);
     if (minD > OFF_ROUTE_THRESHOLD_M) triggerReroute(coords);
 
-    const remaining = [[coords.lng, coords.lat], ...rc.slice(closestIdx)];
-    const travelled = [...rc.slice(0, closestIdx + 1), [coords.lng, coords.lat]];
+   const remaining = [[coords.lng, coords.lat], ...rc.slice(closestIdx)];
+
+// Only grey the portion the user has actually walked through —
+// trim the tail so it ends at the user's current position
+const travelledRaw = rc.slice(0, closestIdx + 1);
+const travelled = travelledRaw.length > 0
+  ? [...travelledRaw, [coords.lng, coords.lat]]
+  : [];
 
     let remMeters = 0;
     for (let i = 0; i < remaining.length - 1; i++)
