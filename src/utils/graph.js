@@ -18,9 +18,8 @@ export function validCoord(lat, lng) {
   );
 }
 
-// Helper to format room names with their building
 export const getDisplayName = (n, nodes) => {
-  let buildingName = n.parentNode?.name || n.parentName; // Handles embedded object
+  let buildingName = n.parentNode?.name || n.parentName;
   if (!buildingName && n.parentNodeId) {
     const parent = nodes?.find((node) => node.id === n.parentNodeId);
     if (parent) buildingName = parent.name;
@@ -28,7 +27,6 @@ export const getDisplayName = (n, nodes) => {
   return buildingName ? `${n.name} (${buildingName})` : n.name;
 };
 
-// Helper function to calculate accurate physical distance in meters
 export function getDistanceInMeters(lat1, lon1, lat2, lon2) {
   const R = 6371e3;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
@@ -75,60 +73,119 @@ export const getBearing = (lat1, lng1, lat2, lng2) => {
 
 export const getTurnDirection = (prev, next) => {
   const diff = ((next - prev + 540) % 360) - 180;
-  if (Math.abs(diff) < 22) return "straight";
-  if (diff > 0 && diff <= 135) return "right";
-  if (diff < 0 && diff >= -135) return "left";
-  return "u-turn";
+  if (Math.abs(diff) < 30) return "straight";   // wider dead-zone → fewer phantom turns
+  if (diff >= 30 && diff <= 150) return "right";
+  if (diff <= -30 && diff >= -150) return "left";
+  return "u-turn"; // only true 180° reversals (|diff| > 150)
 };
+
+// ─── Smooth a bearing sequence using a distance-weighted average ──────────────
+// Looks ahead up to SMOOTH_DIST metres and returns the weighted mean bearing.
+// This kills phantom turns caused by GPS jitter or tight waypoint clusters.
+const SMOOTH_DIST = 15; // metres to look ahead when averaging bearing
+
+function smoothedBearing(coords, fromIdx) {
+  // Collect upcoming segments up to SMOOTH_DIST m
+  let sinSum = 0, cosSum = 0, distSoFar = 0;
+  for (let i = fromIdx; i < coords.length - 1; i++) {
+    const segDist = getDistanceInMeters(
+      coords[i][1], coords[i][0],
+      coords[i + 1][1], coords[i + 1][0],
+    );
+    if (segDist < 0.1) continue; // skip degenerate duplicate points
+    const b = getBearing(coords[i][1], coords[i][0], coords[i + 1][1], coords[i + 1][0]);
+    const rad = (b * Math.PI) / 180;
+    const w = Math.min(segDist, SMOOTH_DIST - distSoFar);
+    sinSum += Math.sin(rad) * w;
+    cosSum += Math.cos(rad) * w;
+    distSoFar += segDist;
+    if (distSoFar >= SMOOTH_DIST) break;
+  }
+  if (sinSum === 0 && cosSum === 0) {
+    // fallback: raw bearing of this single segment
+    return getBearing(
+      coords[fromIdx][1], coords[fromIdx][0],
+      coords[fromIdx + 1][1], coords[fromIdx + 1][0],
+    );
+  }
+  return ((Math.atan2(sinSum, cosSum) * 180) / Math.PI + 360) % 360;
+}
+
+// ─── buildDirections ─────────────────────────────────────────────────────────
+// Rules:
+//  • Ignore segments shorter than MIN_STEP_DIST — they are internal waypoints,
+//    not real decision points.
+//  • Use smoothedBearing so micro-jags don't generate phantom turns.
+//  • Never emit a u-turn from graph data — u-turns only appear during live
+//    rerouting (the reroute logic in CampusGraph handles that path separately).
+//  • Merge consecutive "straight" continuations into the running segment.
+
+const MIN_STEP_DIST = 8; // metres — shorter segments are merged silently
 
 export const buildDirections = (coords) => {
   if (coords.length < 2) return [];
+
   const steps = [];
-  let segStart = 0;
-  let segBearing = getBearing(
-    coords[0][1],
-    coords[0][0],
-    coords[1][1],
-    coords[1][0],
-  );
-  let segDist = 0;
+
+  // ── Phase 1: collect candidate turn points ────────────────────────────────
+  // A candidate is any index where the smoothed bearing changes meaningfully
+  // AND the accumulated distance since the last candidate exceeds MIN_STEP_DIST.
+
+  let segStartIdx  = 0;
+  let segBearing   = smoothedBearing(coords, 0);
+  let segDist      = 0;
 
   for (let i = 0; i < coords.length - 1; i++) {
-    segDist += getDistanceInMeters(
-      coords[i][1],
-      coords[i][0],
-      coords[i + 1][1],
-      coords[i + 1][0],
+    const dist = getDistanceInMeters(
+      coords[i][1], coords[i][0],
+      coords[i + 1][1], coords[i + 1][0],
     );
+
+    // Skip degenerate duplicate coordinates
+    if (dist < 0.1) continue;
+
+    segDist += dist;
+
     const isLast = i === coords.length - 2;
+
     if (isLast) {
+      // Always emit the final "arrive" step
       steps.push({
         type: "arrive",
         bearing: segBearing,
         distance: Math.round(segDist),
-        coordIndex: segStart,
+        coordIndex: segStartIdx,
       });
       break;
     }
-    const nextBearing = getBearing(
-      coords[i + 1][1],
-      coords[i + 1][0],
-      coords[i + 2][1],
-      coords[i + 2][0],
-    );
+
+    // Only evaluate a turn if this segment is long enough to matter
+    if (segDist < MIN_STEP_DIST) continue;
+
+    const nextBearing = smoothedBearing(coords, i + 1);
     const turn = getTurnDirection(segBearing, nextBearing);
-    if (turn !== "straight") {
-      steps.push({
-        type: turn,
-        bearing: segBearing,
-        distance: Math.round(segDist),
-        coordIndex: segStart,
-      });
-      segStart = i + 1;
-      segBearing = nextBearing;
-      segDist = 0;
-    }
+
+    if (turn === "straight") continue; // keep accumulating
+
+    // ── Suppress u-turns from graph data ─────────────────────────────────
+    // A genuine u-turn in a campus graph almost never exists — it's always
+    // a data artifact (two overlapping waypoints, a hairpin < 1 m, etc.).
+    // U-turns are only valid during live rerouting, which bypasses this
+    // function and updates the route directly.
+    if (turn === "u-turn") continue;
+
+    steps.push({
+      type: turn,
+      bearing: segBearing,
+      distance: Math.round(segDist),
+      coordIndex: segStartIdx,
+    });
+
+    segStartIdx = i + 1;
+    segBearing  = nextBearing;
+    segDist     = 0;
   }
+
   return steps;
 };
 
@@ -139,6 +196,7 @@ export const buildArrowFeatures = (coordsArray, intervalM = 18) => {
     const [lng1, lat1] = coordsArray[i];
     const [lng2, lat2] = coordsArray[i + 1];
     const segDist = getDistanceInMeters(lat1, lng1, lat2, lng2);
+    if (segDist < 0.1) continue;
     const bearing = getBearing(lat1, lng1, lat2, lng2);
     let offset = intervalM - (distAccum % intervalM);
     while (offset <= segDist) {
@@ -147,10 +205,7 @@ export const buildArrowFeatures = (coordsArray, intervalM = 18) => {
         type: "Feature",
         geometry: {
           type: "Point",
-          coordinates: [
-            lng1 + (lng2 - lng1) * frac,
-            lat1 + (lat2 - lat1) * frac,
-          ],
+          coordinates: [lng1 + (lng2 - lng1) * frac, lat1 + (lat2 - lat1) * frac],
         },
         properties: { bearing },
       });
@@ -163,10 +218,10 @@ export const buildArrowFeatures = (coordsArray, intervalM = 18) => {
 
 export const DIR = {
   straight: { icon: "↑", label: "Continue straight", color: "#4285F4" },
-  right: { icon: "→", label: "Turn right", color: "#FBBC05" },
-  left: { icon: "←", label: "Turn left", color: "#FBBC05" },
-  "u-turn": { icon: "↩", label: "Make a U-turn", color: "#EA4335" },
-  arrive: { icon: "🏁", label: "You have arrived", color: "#34A853" },
+  right:    { icon: "→", label: "Turn right",         color: "#FBBC05" },
+  left:     { icon: "←", label: "Turn left",          color: "#FBBC05" },
+  "u-turn": { icon: "↩", label: "Make a U-turn",      color: "#EA4335" },
+  arrive:   { icon: "🏁", label: "You have arrived",   color: "#34A853" },
 };
 
 export const injectStyles = () => {
