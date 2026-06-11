@@ -17,7 +17,14 @@ import {
 } from "../utils/graph";
 
 const API_USER_BASE = `${import.meta.env.VITE_API_URL}/api/v1/user`;
-const OFF_ROUTE_THRESHOLD_M = 35;
+
+// Off-route threshold: if user strays more than this many metres from the
+// nearest route point, trigger a reroute.
+const OFF_ROUTE_THRESHOLD_M = 20;
+
+// Minimum milliseconds between two consecutive reroute API calls.
+// Reduced from 5 000 → 2 000 so the app reacts faster after a wrong turn.
+const REROUTE_COOLDOWN_MS = 2000;
 
 // ─── OSRM fallback (only when campus graph returns no edges) ──────────────────
 const OSRM_BASE = "https://router.project-osrm.org/route/v1/foot";
@@ -62,6 +69,43 @@ function useCompassHeading() {
   return heading;
 }
 
+// ─── 1-second GPS hook ────────────────────────────────────────────────────────
+// Overrides whatever interval useGPS provides by also running our own
+// watchPosition with maximumAge:0 / timeout:1000 so we get ≥1 fix/sec.
+// The result is merged with the shared coords from useGPS so the rest of
+// the component keeps working unchanged.
+function use1sGPS() {
+  const { coords: sharedCoords, error: gpsError } = useGPS();
+  const [coords, setCoords] = useState(null);
+
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+
+    const id = navigator.geolocation.watchPosition(
+      (pos) => {
+        setCoords({
+          lat:      pos.coords.latitude,
+          lng:      pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+          heading:  pos.coords.heading,
+          speed:    pos.coords.speed,
+        });
+      },
+      (err) => console.warn("GPS watch error:", err),
+      {
+        enableHighAccuracy: true,
+        maximumAge:         0,    // never use a cached position
+        timeout:            1000, // demand a fresh fix within 1 s
+      },
+    );
+
+    return () => navigator.geolocation.clearWatch(id);
+  }, []);
+
+  // Fall back to the shared hook's value while our own watcher hasn't fired yet
+  return { coords: coords ?? sharedCoords, error: gpsError };
+}
+
 export default function CampusGraph() {
   const mapRef          = useRef(null);
   const mapInstance     = useRef(null);
@@ -72,7 +116,7 @@ export default function CampusGraph() {
   const searchPinRef    = useRef(null);
   const autoFollowRef   = useRef(false);
   const reFollowTimerRef = useRef(null);
-  const stepsListRef    = useRef(null); // ref for auto-scroll in live steps panel
+  const stepsListRef    = useRef(null);
 
   // reroute guards
   const isReroutingRef     = useRef(false);
@@ -81,7 +125,9 @@ export default function CampusGraph() {
   const mapDataRef         = useRef({ nodes: [], edges: [] });
 
   const [mapData, setMapData] = useState({ nodes: [], edges: [] });
-  const { coords, error: gpsError } = useGPS();
+
+  // Use our 1-second GPS hook instead of the raw useGPS hook
+  const { coords, error: gpsError } = use1sGPS();
   const compassHeading = useCompassHeading();
 
   const effectiveHeading = useCallback(() => {
@@ -115,12 +161,8 @@ export default function CampusGraph() {
   const [isRerouting,  setIsRerouting]  = useState(false);
   const [previewCollapsed, setPreviewCollapsed] = useState(false);
 
-  // ── mode flags ────────────────────────────────────────────────────────────
-  // isPreviewMode = true  → source was manually picked (≠ GPS node)
-  //                false → source == GPS nearest node → navigation available
   const [isPreviewMode,   setIsPreviewMode]   = useState(false);
   const [showStepsPanel,  setShowStepsPanel]  = useState(false);
-  // Live metres from user to the next turn point — updates every GPS tick
   const [distToNextTurn,  setDistToNextTurn]  = useState(null);
 
   // keep refs in sync
@@ -298,73 +340,71 @@ export default function CampusGraph() {
       .catch((e) => console.error("Graph fetch failed:", e));
   }, []);
 
- // ── Heading cone — memoised, only recomputes when heading actually changes ──
-const buildHeadingCone = useCallback((lat, lng, h) => {
-  if (h == null) return { type: "FeatureCollection", features: [] };
-  const R = 0.00015, sp = 30, toR = (d) => (d * Math.PI) / 180;
-  return {
-    type: "FeatureCollection",
-    features: [{ type: "Feature", properties: {},
-      geometry: { type: "Polygon", coordinates: [[[lng, lat],
-        [lng + R * Math.sin(toR(h - sp)), lat + R * Math.cos(toR(h - sp))],
-        [lng + R * Math.sin(toR(h + sp)), lat + R * Math.cos(toR(h + sp))],
-        [lng, lat]]] } }]
-  };
-}, []); // no deps — pure math, stable reference forever
+  // ── Heading cone ──────────────────────────────────────────────────────────
+  const buildHeadingCone = useCallback((lat, lng, h) => {
+    if (h == null) return { type: "FeatureCollection", features: [] };
+    const R = 0.00015, sp = 30, toR = (d) => (d * Math.PI) / 180;
+    return {
+      type: "FeatureCollection",
+      features: [{ type: "Feature", properties: {},
+        geometry: { type: "Polygon", coordinates: [[[lng, lat],
+          [lng + R * Math.sin(toR(h - sp)), lat + R * Math.cos(toR(h - sp))],
+          [lng + R * Math.sin(toR(h + sp)), lat + R * Math.cos(toR(h + sp))],
+          [lng, lat]]] } }]
+    };
+  }, []);
 
- // ── GPS dot + heading cone — only repaints when position or heading changes ──
-const prevHeadingRef = useRef(null);
-const prevLatRef     = useRef(null);
-const prevLngRef     = useRef(null);
+  const prevHeadingRef = useRef(null);
+  const prevLatRef     = useRef(null);
+  const prevLngRef     = useRef(null);
 
-useEffect(() => {
-  const map = mapInstance.current;
-  if (!map || !coords) return;
+  // ── GPS dot + heading cone ────────────────────────────────────────────────
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !coords) return;
 
-  // Always update marker position
-  if (!userMarkerRef.current) {
-    const wrap = document.createElement("div");
-    wrap.style.cssText = "position:relative;width:22px;height:22px;pointer-events:none;";
-    const pulse = document.createElement("div");
-    pulse.style.cssText = "position:absolute;inset:0;background:rgba(66,133,244,0.35);border-radius:50%;animation:gpsPulse 2s ease-out infinite;";
-    const dot = document.createElement("div");
-    dot.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;background:#4285F4;border:2.5px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(66,133,244,0.9);";
-    wrap.appendChild(pulse); wrap.appendChild(dot);
-    userMarkerRef.current = new maplibregl.Marker({ element: wrap, anchor: "center" })
-      .setLngLat([coords.lng, coords.lat]).addTo(map);
-  } else {
-    userMarkerRef.current.setLngLat([coords.lng, coords.lat]);
-  }
+    if (!userMarkerRef.current) {
+      const wrap = document.createElement("div");
+      wrap.style.cssText = "position:relative;width:22px;height:22px;pointer-events:none;";
+      const pulse = document.createElement("div");
+      pulse.style.cssText = "position:absolute;inset:0;background:rgba(66,133,244,0.35);border-radius:50%;animation:gpsPulse 2s ease-out infinite;";
+      const dot = document.createElement("div");
+      dot.style.cssText = "position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:14px;height:14px;background:#4285F4;border:2.5px solid #fff;border-radius:50%;box-shadow:0 0 12px rgba(66,133,244,0.9);";
+      wrap.appendChild(pulse); wrap.appendChild(dot);
+      userMarkerRef.current = new maplibregl.Marker({ element: wrap, anchor: "center" })
+        .setLngLat([coords.lng, coords.lat]).addTo(map);
+    } else {
+      userMarkerRef.current.setLngLat([coords.lng, coords.lat]);
+    }
 
-  // Accuracy circle — update every tick (cheap, no visual flicker)
-  map.getSource("accuracy-src")?.setData({ type: "FeatureCollection", features: [{
-    type: "Feature", geometry: { type: "Point", coordinates: [coords.lng, coords.lat] }, properties: {}
-  }]});
+    map.getSource("accuracy-src")?.setData({ type: "FeatureCollection", features: [{
+      type: "Feature", geometry: { type: "Point", coordinates: [coords.lng, coords.lat] }, properties: {}
+    }]});
 
-  // Heading cone — only update if heading or position changed meaningfully
-  const hdg = coords.speed != null && coords.speed > 0.5 && coords.heading != null
-    ? coords.heading
-    : compassHeading;
+    const hdg = coords.speed != null && coords.speed > 0.5 && coords.heading != null
+      ? coords.heading
+      : compassHeading;
 
-  const latChanged = Math.abs((prevLatRef.current ?? 0) - coords.lat) > 0.000001;
-  const lngChanged = Math.abs((prevLngRef.current ?? 0) - coords.lng) > 0.000001;
-  const hdgChanged = hdg == null
-    ? prevHeadingRef.current != null
-    : Math.abs(((hdg - (prevHeadingRef.current ?? hdg) + 540) % 360) - 180) > 2; // >2° change
+    const latChanged = Math.abs((prevLatRef.current ?? 0) - coords.lat) > 0.000001;
+    const lngChanged = Math.abs((prevLngRef.current ?? 0) - coords.lng) > 0.000001;
+    const hdgChanged = hdg == null
+      ? prevHeadingRef.current != null
+      : Math.abs(((hdg - (prevHeadingRef.current ?? hdg) + 540) % 360) - 180) > 2;
 
-  if (latChanged || lngChanged || hdgChanged) {
-    map.getSource("heading-src")?.setData(buildHeadingCone(coords.lat, coords.lng, hdg));
-    prevLatRef.current     = coords.lat;
-    prevLngRef.current     = coords.lng;
-    prevHeadingRef.current = hdg;
-  }
-}, [coords, compassHeading, buildHeadingCone]);
+    if (latChanged || lngChanged || hdgChanged) {
+      map.getSource("heading-src")?.setData(buildHeadingCone(coords.lat, coords.lng, hdg));
+      prevLatRef.current     = coords.lat;
+      prevLngRef.current     = coords.lng;
+      prevHeadingRef.current = hdg;
+    }
+  }, [coords, compassHeading, buildHeadingCone]);
 
-  // ── Reroute (campus edges first, OSRM if empty) ───────────────────────────
+  // ── Reroute ───────────────────────────────────────────────────────────────
+  // Cooldown is 2 s (down from 5 s) so the app reacts quickly after a wrong turn.
   const triggerReroute = useCallback(async (currentCoords) => {
     if (isReroutingRef.current) return;
     const now = Date.now();
-    if (now - lastRerouteTimeRef.current < 5000) return;
+    if (now - lastRerouteTimeRef.current < REROUTE_COOLDOWN_MS) return;
     const dest = selectedDestRef.current;
     if (!dest) return;
     const data = mapDataRef.current;
@@ -391,6 +431,9 @@ useEffect(() => {
         catch (e) { console.warn("OSRM fallback failed", e); return; }
       }
 
+      // Prepend the user's exact live position so the route line starts from them.
+      // This also means the very first segment will show a u-turn if they're
+      // facing the wrong way — which is the correct instruction.
       arr.unshift([currentCoords.lng, currentCoords.lat]);
       if (arr.length < 2) return;
 
@@ -398,7 +441,9 @@ useEffect(() => {
       for (let i = 0; i < arr.length - 1; i++)
         total += getDistanceInMeters(arr[i][1], arr[i][0], arr[i+1][1], arr[i+1][0]);
 
-      const built = buildDirections(arr);
+      // allowUTurn=true because we just prepended the live GPS position,
+      // so the new first segment may genuinely require turning around.
+      const built = buildDirections(arr, true);
       setRouteCoords(arr);  routeCoordsRef.current = arr;
       setDirections(built); directionsRef.current  = built;
       setTravelledIdx(0); setStepIdx(0); stepIdxRef.current = 0; setDistToNextTurn(null);
@@ -419,20 +464,22 @@ useEffect(() => {
     }
   }, []);
 
-  // ── Navigation tracking — runs every GPS tick ─────────────────────────────
+  // ── Navigation tracking — runs every GPS tick (≈1 s) ─────────────────────
   useEffect(() => {
     const map = mapInstance.current;
     if (!map || !coords || !navigating) return;
     const rc = routeCoordsRef.current;
     if (!rc.length) return;
 
-    // closest route point
+    // Find the closest point on the route to the user's current position
     let minD = Infinity, closestIdx = 0;
     rc.forEach(([lng, lat], i) => {
       const d = getDistanceInMeters(coords.lat, coords.lng, lat, lng);
       if (d < minD) { minD = d; closestIdx = i; }
     });
     setTravelledIdx(closestIdx);
+
+    // Trigger reroute when user drifts off-route
     if (minD > OFF_ROUTE_THRESHOLD_M) triggerReroute(coords);
 
     const remaining = [[coords.lng, coords.lat], ...rc.slice(closestIdx)];
@@ -463,8 +510,6 @@ useEffect(() => {
         stepIdxRef.current = ai;
       }
 
-      // Walk along route coords from closestIdx → next turn's coordIndex
-      // to get the true path distance (not straight-line) to the upcoming turn
       const nextTurnStep = dirs[ai + 1];
       if (nextTurnStep && rc[nextTurnStep.coordIndex]) {
         let d = getDistanceInMeters(
@@ -476,12 +521,11 @@ useEffect(() => {
         }
         setDistToNextTurn(Math.round(d));
       } else {
-        // On the final leg — no upcoming turn, clear the counter
         setDistToNextTurn(null);
       }
     }
 
-    // auto-follow map
+    // Auto-follow: keep map centred on user with forward bearing
     if (remaining.length >= 2 && autoFollowRef.current) {
       const bearing = getBearing(remaining[0][1], remaining[0][0], remaining[1][1], remaining[1][0]);
       map.easeTo({ center: [coords.lng, coords.lat], bearing, zoom: 18.5, pitch: 45, duration: 700 });
@@ -544,7 +588,6 @@ useEffect(() => {
       setSourceQuery(`Current Location (${nearest.name})`);
       usingGPS = true;
     } else {
-      // Check if the manually-selected source is the same as the nearest GPS node
       if (coords) {
         let minD = Infinity, nearest = null;
         (mapData?.nodes || []).forEach((n) => {
@@ -561,7 +604,6 @@ useEffect(() => {
       const edges = res.data.data || [];
       let arr     = edgesToCoords(edges, mapData.nodes);
 
-      // OSRM fallback only when campus graph has no path
       if (arr.length === 0) {
         try {
           arr = await fetchOSRMRoute(activeSource, selectedDest);
@@ -572,7 +614,6 @@ useEffect(() => {
         }
       }
 
-      // GPS mode: prepend live position so line starts from the user's dot
       if (usingGPS && coords) arr.unshift([coords.lng, coords.lat]);
 
       let total = 0;
@@ -590,9 +631,6 @@ useEffect(() => {
       setSheetOpen(false);
       setPreviewCollapsed(false);
       setShowStepsPanel(false);
-
-      // ── Set mode ──────────────────────────────────────────────────────────
-      // preview = manual source that is NOT the user's current GPS node
       setIsPreviewMode(!usingGPS);
 
       const map = mapInstance.current;
@@ -615,14 +653,13 @@ useEffect(() => {
     }
   };
 
-  // ── Start navigation (GPS mode only) ─────────────────────────────────────
+  // ── Start navigation ──────────────────────────────────────────────────────
   const handleStartNavigation = () => {
     setNavigating(true);
     autoFollowRef.current = true;
     setSheetOpen(false);
     isReroutingRef.current    = false;
     lastRerouteTimeRef.current = 0;
-    // keep steps panel open so user can see live directions
     const map = mapInstance.current;
     if (map && coords)
       map.easeTo({ center: [coords.lng, coords.lat], zoom: 18.5, pitch: 45, duration: 1200 });
@@ -667,9 +704,7 @@ useEffect(() => {
   const activeStep = directions[stepIdx];
   const dirInfo    = activeStep ? DIR[activeStep.type] || DIR.straight : null;
 
-  // ── Steps panel — shared by both modes ───────────────────────────────────
-  // In preview mode: static list, no active highlighting
-  // In nav mode:     live, active step highlighted + auto-scrolled, completed greyed
+  // ── Steps panel ───────────────────────────────────────────────────────────
   const StepsPanel = () => (
     <div style={{
       position: "absolute", bottom: previewCollapsed ? 62 : (navigating ? 170 : 160),
@@ -682,7 +717,6 @@ useEffect(() => {
       maxHeight: navigating ? "52vh" : "60vh",
       transition: "bottom 0.25s ease",
     }}>
-      {/* Panel header */}
       <div style={{ display: "flex", alignItems: "center", padding: "14px 16px 10px",
         borderBottom: "1px solid #1e1e1e", flexShrink: 0 }}>
         <div style={{ flex: 1 }}>
@@ -701,7 +735,6 @@ useEffect(() => {
           aria-label="Close directions">✕</button>
       </div>
 
-      {/* Steps list */}
       <div ref={stepsListRef} style={{ overflowY: "auto", padding: "8px 12px 4px", flex: 1 }}>
         {directions.map((step, i) => {
           const di        = DIR[step.type] || DIR.straight;
@@ -735,7 +768,6 @@ useEffect(() => {
                   </div>
                 )}
               </div>
-              {/* Step number badge */}
               <div style={{ fontSize: 10, color: isActive ? di.color : "#333",
                 fontWeight: isActive ? 700 : 400, flexShrink: 0, minWidth: 16, textAlign: "right" }}>
                 {i + 1}
@@ -744,7 +776,6 @@ useEffect(() => {
           );
         })}
 
-        {/* Destination footer row */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px",
           borderRadius: 10, marginBottom: 8,
           background: arrived ? "rgba(52,168,83,0.15)" : "rgba(52,168,83,0.06)",
@@ -760,7 +791,6 @@ useEffect(() => {
         </div>
       </div>
 
-      {/* Preview mode footer notice */}
       {isPreviewMode && !navigating && (
         <div style={{ padding: "10px 14px calc(12px + env(safe-area-inset-bottom))",
           borderTop: "1px solid #1a1a1a", flexShrink: 0 }}>
@@ -813,7 +843,7 @@ useEffect(() => {
         </div>
       )}
 
-      {/* ── Live turn banner (navigation) ── */}
+      {/* ── Live turn banner ── */}
       {navigating && dirInfo && !arrived && !isRerouting && (
         <div style={{ position: "absolute", top: 16, left: 12, right: 12, zIndex: 25, marginTop: 50,
           animation: "dirSlide 0.3s ease", background: "rgba(10,10,10,0.97)",
@@ -850,10 +880,10 @@ useEffect(() => {
         </div>
       )}
 
-      {/* ── Steps panel (preview + live nav) ── */}
+      {/* ── Steps panel ── */}
       {showStepsPanel && routeReady && directions.length > 0 && !arrived && <StepsPanel />}
 
-      {/* ── FABs ── */}
+      {/* ── FABs — reroute button removed ── */}
       <div style={{ position: "absolute", right: 12,
         bottom: (routeReady || navigating) && !arrived ? (previewCollapsed ? 70 : 180) : 80,
         zIndex: 23, display: "flex", flexDirection: "column", gap: 10,
@@ -874,18 +904,7 @@ useEffect(() => {
               boxShadow: "0 4px 16px rgba(0,0,0,0.5)" }}>🧭</button>
         )}
 
-        {navigating && !arrived && (
-          <button className="cnav-btn" onClick={() => coords && triggerReroute(coords)}
-            disabled={isRerouting} title="Reroute"
-            style={{ width: 44, height: 44, borderRadius: "50%",
-              background: isRerouting ? "#2a2a2a" : "rgba(14,14,14,0.96)",
-              border: "1px solid #2a2a2a", color: isRerouting ? "#555" : "#fbbc04",
-              fontSize: 18, cursor: isRerouting ? "not-allowed" : "pointer",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              boxShadow: "0 4px 16px rgba(0,0,0,0.5)" }}>🔄</button>
-        )}
-
-        {/* Steps toggle FAB — visible whenever route is ready */}
+        {/* Steps toggle FAB */}
         {(routeReady || navigating) && directions.length > 0 && !arrived && (
           <button className="cnav-btn" onClick={() => setShowStepsPanel((v) => !v)}
             style={{ width: 44, height: 44, borderRadius: "50%",
@@ -903,7 +922,6 @@ useEffect(() => {
           backdropFilter: "blur(14px)", boxShadow: "0 -8px 32px rgba(0,0,0,0.6)",
           borderRadius: "16px 16px 0 0", overflow: "hidden" }}>
 
-          {/* Drag handle */}
           <div onClick={() => setPreviewCollapsed((v) => !v)}
             style={{ display: "flex", justifyContent: "center", alignItems: "center",
               padding: "10px 0 6px", cursor: "pointer", gap: 6 }}>
@@ -915,7 +933,6 @@ useEffect(() => {
 
           {!previewCollapsed && (
             <div style={{ padding: "0 16px calc(16px + env(safe-area-inset-bottom))" }}>
-              {/* ETA row */}
               {routeInfo && (
                 <div style={{ display: "flex", gap: 12, marginBottom: 14, justifyContent: "center" }}>
                   <div style={{ textAlign: "center" }}>
@@ -947,12 +964,10 @@ useEffect(() => {
                 </div>
               )}
 
-              {/* Action buttons */}
               <div style={{ display: "flex", gap: 10 }}>
                 {!navigating ? (
                   <>
                     {isPreviewMode ? (
-                      /* Manual source ≠ GPS → Show Directions */
                       <button className="cnav-btn"
                         onClick={() => setShowStepsPanel((v) => !v)}
                         style={{ flex: 1, padding: "14px 0",
@@ -962,7 +977,6 @@ useEffect(() => {
                         ☰ {showStepsPanel ? "Hide Directions" : "Show Directions"}
                       </button>
                     ) : (
-                      /* GPS source == nearest node → Start Navigation */
                       <button className="cnav-btn" onClick={handleStartNavigation}
                         style={{ flex: 1, padding: "14px 0", background: "#34a853",
                           color: "#fff", border: "none", borderRadius: 14,
@@ -985,7 +999,6 @@ useEffect(() => {
             </div>
           )}
 
-          {/* Collapsed mini-bar */}
           {previewCollapsed && (
             <div style={{ display: "flex", alignItems: "center", gap: 10,
               padding: "0 16px calc(12px + env(safe-area-inset-bottom))" }}>

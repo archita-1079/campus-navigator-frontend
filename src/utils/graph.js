@@ -73,26 +73,23 @@ export const getBearing = (lat1, lng1, lat2, lng2) => {
 
 export const getTurnDirection = (prev, next) => {
   const diff = ((next - prev + 540) % 360) - 180;
-  if (Math.abs(diff) < 30) return "straight";   // wider dead-zone → fewer phantom turns
+  if (Math.abs(diff) < 30) return "straight";
   if (diff >= 30 && diff <= 150) return "right";
   if (diff <= -30 && diff >= -150) return "left";
-  return "u-turn"; // only true 180° reversals (|diff| > 150)
+  return "u-turn"; // true 180° reversals (|diff| > 150)
 };
 
 // ─── Smooth a bearing sequence using a distance-weighted average ──────────────
-// Looks ahead up to SMOOTH_DIST metres and returns the weighted mean bearing.
-// This kills phantom turns caused by GPS jitter or tight waypoint clusters.
-const SMOOTH_DIST = 15; // metres to look ahead when averaging bearing
+const SMOOTH_DIST = 15;
 
 function smoothedBearing(coords, fromIdx) {
-  // Collect upcoming segments up to SMOOTH_DIST m
   let sinSum = 0, cosSum = 0, distSoFar = 0;
   for (let i = fromIdx; i < coords.length - 1; i++) {
     const segDist = getDistanceInMeters(
       coords[i][1], coords[i][0],
       coords[i + 1][1], coords[i + 1][0],
     );
-    if (segDist < 0.1) continue; // skip degenerate duplicate points
+    if (segDist < 0.1) continue;
     const b = getBearing(coords[i][1], coords[i][0], coords[i + 1][1], coords[i + 1][0]);
     const rad = (b * Math.PI) / 180;
     const w = Math.min(segDist, SMOOTH_DIST - distSoFar);
@@ -102,7 +99,6 @@ function smoothedBearing(coords, fromIdx) {
     if (distSoFar >= SMOOTH_DIST) break;
   }
   if (sinSum === 0 && cosSum === 0) {
-    // fallback: raw bearing of this single segment
     return getBearing(
       coords[fromIdx][1], coords[fromIdx][0],
       coords[fromIdx + 1][1], coords[fromIdx + 1][0],
@@ -112,28 +108,23 @@ function smoothedBearing(coords, fromIdx) {
 }
 
 // ─── buildDirections ─────────────────────────────────────────────────────────
-// Rules:
-//  • Ignore segments shorter than MIN_STEP_DIST — they are internal waypoints,
-//    not real decision points.
-//  • Use smoothedBearing so micro-jags don't generate phantom turns.
-//  • Never emit a u-turn from graph data — u-turns only appear during live
-//    rerouting (the reroute logic in CampusGraph handles that path separately).
-//  • Merge consecutive "straight" continuations into the running segment.
+// U-turns ARE allowed — they appear when the graph genuinely doubles back
+// (e.g. after a reroute prepends the live GPS position) or when the user
+// has walked away from the route and a new path requires reversing.
+const MIN_STEP_DIST = 8;
 
-const MIN_STEP_DIST = 8; // metres — shorter segments are merged silently
-
-export const buildDirections = (coords) => {
+// allowUTurn should be true ONLY when the route was freshly prepended with the
+// user's live GPS position (i.e. after an automatic reroute). Static graph
+// paths from the API never genuinely require a 180° reversal — any apparent
+// U-turn there is a data artefact from waypoint clustering.
+export const buildDirections = (coords, allowUTurn = false) => {
   if (coords.length < 2) return [];
 
   const steps = [];
 
-  // ── Phase 1: collect candidate turn points ────────────────────────────────
-  // A candidate is any index where the smoothed bearing changes meaningfully
-  // AND the accumulated distance since the last candidate exceeds MIN_STEP_DIST.
-
-  let segStartIdx  = 0;
-  let segBearing   = smoothedBearing(coords, 0);
-  let segDist      = 0;
+  let segStartIdx = 0;
+  let segBearing  = smoothedBearing(coords, 0);
+  let segDist     = 0;
 
   for (let i = 0; i < coords.length - 1; i++) {
     const dist = getDistanceInMeters(
@@ -141,7 +132,6 @@ export const buildDirections = (coords) => {
       coords[i + 1][1], coords[i + 1][0],
     );
 
-    // Skip degenerate duplicate coordinates
     if (dist < 0.1) continue;
 
     segDist += dist;
@@ -149,7 +139,6 @@ export const buildDirections = (coords) => {
     const isLast = i === coords.length - 2;
 
     if (isLast) {
-      // Always emit the final "arrive" step
       steps.push({
         type: "arrive",
         bearing: segBearing,
@@ -159,20 +148,16 @@ export const buildDirections = (coords) => {
       break;
     }
 
-    // Only evaluate a turn if this segment is long enough to matter
     if (segDist < MIN_STEP_DIST) continue;
 
     const nextBearing = smoothedBearing(coords, i + 1);
     const turn = getTurnDirection(segBearing, nextBearing);
 
-    if (turn === "straight") continue; // keep accumulating
+    if (turn === "straight") continue;
 
-    // ── Suppress u-turns from graph data ─────────────────────────────────
-    // A genuine u-turn in a campus graph almost never exists — it's always
-    // a data artifact (two overlapping waypoints, a hairpin < 1 m, etc.).
-    // U-turns are only valid during live rerouting, which bypasses this
-    // function and updates the route directly.
-    if (turn === "u-turn") continue;
+    // Suppress U-turns from static graph data — they are always artefacts.
+    // Only allow them when the caller confirms a live GPS prepend was done.
+    if (turn === "u-turn" && !allowUTurn) continue;
 
     steps.push({
       type: turn,
