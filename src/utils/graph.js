@@ -205,7 +205,7 @@ export const DIR = {
   straight: { icon: "↑", label: "Continue straight", color: "#4285F4" },
   right:    { icon: "→", label: "Turn right",         color: "#FBBC05" },
   left:     { icon: "←", label: "Turn left",          color: "#FBBC05" },
-  "u-turn": { icon: "↩", label: "Make a U-turn",      color: "#EA4335" },
+  "u-turn": { icon: "c", label: "Make a U-turn",      color: "#EA4335" },
   arrive:   { icon: "🏁", label: "You have arrived",   color: "#34A853" },
 };
 
