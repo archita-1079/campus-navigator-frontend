@@ -788,7 +788,9 @@ export default function CampusGraph() {
   // ── Find route ────────────────────────────────────────────────────────────
   const handleFindRoute = async () => {
     if (!selectedDest) { alert("Please select a destination!"); return; }
-
+    
+    if (selectedDest.id == selectedSource.id) { alert("Source and Destination is the same."); return; }
+    
     let activeSource = selectedSource;
     let usingGPS = false;
 
