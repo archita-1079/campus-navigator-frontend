@@ -355,7 +355,7 @@ export default function CampusGraph() {
         type: "symbol",
         source: "uturn-src",
         layout: {
-          "text-field": "↩",
+          "text-field": "↻",
           "text-size": 28,
           "text-allow-overlap": true,
           "text-ignore-placement": true,
