@@ -23,11 +23,8 @@ const API_USER_BASE = `${import.meta.env.VITE_API_URL}/api/v1/user`;
 const OFF_ROUTE_THRESHOLD_M = 10;
 
 // Minimum milliseconds between two consecutive reroute API calls.
+// Reduced from 5 000 → 2 000 so the app reacts faster after a wrong turn.
 const REROUTE_COOLDOWN_MS = 1000;
-
-// U-turn detection: if remaining distance increases by this many metres
-// in a single GPS tick, the user is walking away from the destination.
-const UTURN_DISTANCE_DELTA_M = 5;
 
 // ─── OSRM fallback (only when campus graph returns no edges) ──────────────────
 const OSRM_BASE = "https://router.project-osrm.org/route/v1/foot";
@@ -57,42 +54,6 @@ function edgesToCoords(edges, nodes) {
   return arr;
 }
 
-// ─── Insert a smooth U-turn arc between the user position and the first
-//     route point so MapLibre renders a visible curved reversal path.
-function insertUTurnArc(arr) {
-  if (arr.length < 2) return arr;
-  const [x0, y0] = arr[0]; // user's live position
-  const [x1, y1] = arr[1]; // first graph node on the new route
-
-  // Perpendicular offset — pushes the arc "to the side" relative to the
-  // segment direction so it looks like a proper turning loop.
-  const dx = x1 - x0;
-  const dy = y1 - y0;
-  const scale = 0.00018; // ~20 m offset at campus scale
-
-  // Two control points that form a rounded loop
-  const cp1 = [x0 + dy * scale - dx * 0.25, y0 - dx * scale - dy * 0.25];
-  const cp2 = [x1 + dy * scale + dx * 0.25, y1 - dx * scale + dy * 0.25];
-
-  // Sample 6 points along a cubic bezier for a smooth curve
-  const bezier = (t) => {
-    const mt = 1 - t;
-    return [
-      mt ** 3 * x0 +
-        3 * mt ** 2 * t * cp1[0] +
-        3 * mt * t ** 2 * cp2[0] +
-        t ** 3 * x1,
-      mt ** 3 * y0 +
-        3 * mt ** 2 * t * cp1[1] +
-        3 * mt * t ** 2 * cp2[1] +
-        t ** 3 * y1,
-    ];
-  };
-
-  const arcPoints = [1, 2, 3, 4, 5].map((i) => bezier(i / 6));
-  return [arr[0], ...arcPoints, ...arr.slice(1)];
-}
-
 // ─── Compass heading hook ─────────────────────────────────────────────────────
 function useCompassHeading() {
   const [heading, setHeading] = useState(null);
@@ -112,6 +73,10 @@ function useCompassHeading() {
 }
 
 // ─── 1-second GPS hook ────────────────────────────────────────────────────────
+// Overrides whatever interval useGPS provides by also running our own
+// watchPosition with maximumAge:0 / timeout:1000 so we get ≥1 fix/sec.
+// The result is merged with the shared coords from useGPS so the rest of
+// the component keeps working unchanged.
 function use1sGPS() {
   const { coords: sharedCoords, error: gpsError } = useGPS();
   const [coords, setCoords] = useState(null);
@@ -132,14 +97,15 @@ function use1sGPS() {
       (err) => console.warn("GPS watch error:", err),
       {
         enableHighAccuracy: true,
-        maximumAge: 0,
-        timeout: 1000,
+        maximumAge: 0, // never use a cached position
+        timeout: 1000, // demand a fresh fix within 1 s
       },
     );
 
     return () => navigator.geolocation.clearWatch(id);
   }, []);
 
+  // Fall back to the shared hook's value while our own watcher hasn't fired yet
   return { coords: coords ?? sharedCoords, error: gpsError };
 }
 
@@ -161,11 +127,9 @@ export default function CampusGraph() {
   const selectedDestRef = useRef(null);
   const mapDataRef = useRef({ nodes: [], edges: [] });
 
-  // ── U-turn: track remaining distance from the previous GPS tick ──────────
-  const prevRemMetersRef = useRef(null);
-
   const [mapData, setMapData] = useState({ nodes: [], edges: [] });
 
+  // Use our 1-second GPS hook instead of the raw useGPS hook
   const { coords, error: gpsError } = use1sGPS();
   const compassHeading = useCompassHeading();
 
@@ -206,11 +170,21 @@ export default function CampusGraph() {
   const [uTurnActive, setUTurnActive] = useState(false);
 
   // keep refs in sync
-  useEffect(() => { routeCoordsRef.current = routeCoords; }, [routeCoords]);
-  useEffect(() => { directionsRef.current = directions; }, [directions]);
-  useEffect(() => { stepIdxRef.current = stepIdx; }, [stepIdx]);
-  useEffect(() => { selectedDestRef.current = selectedDest; }, [selectedDest]);
-  useEffect(() => { mapDataRef.current = mapData; }, [mapData]);
+  useEffect(() => {
+    routeCoordsRef.current = routeCoords;
+  }, [routeCoords]);
+  useEffect(() => {
+    directionsRef.current = directions;
+  }, [directions]);
+  useEffect(() => {
+    stepIdxRef.current = stepIdx;
+  }, [stepIdx]);
+  useEffect(() => {
+    selectedDestRef.current = selectedDest;
+  }, [selectedDest]);
+  useEffect(() => {
+    mapDataRef.current = mapData;
+  }, [mapData]);
 
   // ── Auto-scroll active step into view ────────────────────────────────────
   useEffect(() => {
@@ -354,32 +328,6 @@ export default function CampusGraph() {
         paint: { "line-color": "#4285F4", "line-width": 7, "line-opacity": 1 },
       });
 
-      // ── U-turn arc layer — drawn in red on top of the normal route ────────
-      addSrc("uturn-arc-src");
-      map.addLayer({
-        id: "uturn-arc-casing",
-        type: "line",
-        source: "uturn-arc-src",
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": "#b71c1c",
-          "line-width": 13,
-          "line-opacity": 0.9,
-        },
-      });
-      map.addLayer({
-        id: "uturn-arc-fill",
-        type: "line",
-        source: "uturn-arc-src",
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": "#ea4335",
-          "line-width": 7,
-          "line-opacity": 1,
-          "line-dasharray": [2, 1.5],
-        },
-      });
-
       addSrc("arrows-src");
       map.addLayer({
         id: "route-arrows",
@@ -407,7 +355,7 @@ export default function CampusGraph() {
         type: "symbol",
         source: "uturn-src",
         layout: {
-          "text-field": "↻",
+          "text-field": "↩",
           "text-size": 28,
           "text-allow-overlap": true,
           "text-ignore-placement": true,
@@ -653,6 +601,7 @@ export default function CampusGraph() {
   }, [coords, compassHeading, buildHeadingCone]);
 
   // ── Reroute ───────────────────────────────────────────────────────────────
+  // Cooldown is 2 s (down from 5 s) so the app reacts quickly after a wrong turn.
   const triggerReroute = useCallback(async (currentCoords) => {
     if (isReroutingRef.current) return;
     const now = Date.now();
@@ -698,36 +647,32 @@ export default function CampusGraph() {
         }
       }
 
-      // Prepend the user's live position so the route starts from them.
+      // Prepend the user's exact live position so the route line starts from them.
+      // This also means the very first segment will show a u-turn if they're
+      // facing the wrong way — which is the correct instruction.
       arr.unshift([currentCoords.lng, currentCoords.lat]);
       if (arr.length < 2) return;
 
-      // Insert a bezier arc to visually show the U-turn path on the map.
-      const arcArr = insertUTurnArc(arr);
-
       let total = 0;
-      for (let i = 0; i < arcArr.length - 1; i++)
+      for (let i = 0; i < arr.length - 1; i++)
         total += getDistanceInMeters(
-          arcArr[i][1],
-          arcArr[i][0],
-          arcArr[i + 1][1],
-          arcArr[i + 1][0],
+          arr[i][1],
+          arr[i][0],
+          arr[i + 1][1],
+          arr[i + 1][0],
         );
 
-      const built = buildDirections(arcArr, true);
-      setRouteCoords(arcArr);
-      routeCoordsRef.current = arcArr;
+      // allowUTurn=true because we just prepended the live GPS position,
+      // so the new first segment may genuinely require turning around.
+      const built = buildDirections(arr, true);
+      setRouteCoords(arr);
+      routeCoordsRef.current = arr;
       setDirections(built);
       directionsRef.current = built;
       setTravelledIdx(0);
       setStepIdx(0);
       stepIdxRef.current = 0;
       setDistToNextTurn(null);
-
-      // Reset distance tracker so the new route doesn't immediately
-      // trigger another u-turn detection on the first tick.
-      prevRemMetersRef.current = null;
-
       setRouteInfo({
         distance: Math.round(total),
         time: Math.max(1, Math.ceil(total / 1.4 / 60)),
@@ -738,33 +683,18 @@ export default function CampusGraph() {
         map
           .getSource("route-travelled")
           ?.setData({ type: "FeatureCollection", features: [] });
-
-        // Draw the full rerouted path (includes the arc points).
         map.getSource("route-src")?.setData({
           type: "FeatureCollection",
           features: [
             {
               type: "Feature",
-              geometry: { type: "LineString", coordinates: arcArr },
+              geometry: { type: "LineString", coordinates: arr },
             },
           ],
         });
-
-        // Highlight the U-turn arc segment in red (first arc segment only).
-        const arcSegment = arcArr.slice(0, 7); // user pos + 5 bezier pts + first node
-        map.getSource("uturn-arc-src")?.setData({
-          type: "FeatureCollection",
-          features: [
-            {
-              type: "Feature",
-              geometry: { type: "LineString", coordinates: arcSegment },
-            },
-          ],
-        });
-
         map.getSource("arrows-src")?.setData({
           type: "FeatureCollection",
-          features: buildArrowFeatures(arcArr),
+          features: buildArrowFeatures(arr),
         });
       }
     } catch (e) {
@@ -782,7 +712,7 @@ export default function CampusGraph() {
     const rc = routeCoordsRef.current;
     if (!rc.length) return;
 
-    // ── Find the closest point on the route to the user's current position ─
+    // Find the closest point on the route to the user's current position
     let minD = Infinity,
       closestIdx = 0;
     rc.forEach(([lng, lat], i) => {
@@ -794,42 +724,24 @@ export default function CampusGraph() {
     });
     setTravelledIdx(closestIdx);
 
-    // ── Build remaining / travelled slices ────────────────────────────────
-    const remaining = [[coords.lng, coords.lat], ...rc.slice(closestIdx)];
-    const travelled = [
-      ...rc.slice(0, closestIdx + 1),
-      [coords.lng, coords.lat],
-    ];
-
-    // ── Compute remaining distance ────────────────────────────────────────
-    let remMeters = 0;
-    for (let i = 0; i < remaining.length - 1; i++)
-      remMeters += getDistanceInMeters(
-        remaining[i][1],
-        remaining[i][0],
-        remaining[i + 1][1],
-        remaining[i + 1][0],
-      );
-
-    // ── Distance-based U-turn detection ───────────────────────────────────
-    // A genuine u-turn causes the remaining distance to *increase* by at
-    // least UTURN_DISTANCE_DELTA_M metres compared to the previous tick.
-    // We skip the very first tick (prevRemMetersRef is null) and also skip
-    // ticks where the user is close to the destination (< 20 m) to avoid
-    // false positives as the path curves around the final node.
+    // Compare user heading to the bearing toward the next route point.
+    // If the angular difference exceeds 120° the user is heading wrong way.
+    const heading = effectiveHeading();
+    const nextPt = rc[Math.min(closestIdx + 1, rc.length - 1)];
     let detectedUTurn = false;
-    if (
-      prevRemMetersRef.current !== null &&
-      remMeters > 20 &&
-      remMeters > prevRemMetersRef.current + UTURN_DISTANCE_DELTA_M
-    ) {
-      detectedUTurn = true;
+    if (heading != null && nextPt) {
+      const toBearing = getBearing(
+        coords.lat,
+        coords.lng,
+        nextPt[1],
+        nextPt[0],
+      );
+      const diff = Math.abs(((heading - toBearing + 540) % 360) - 180);
+      detectedUTurn = diff > 120;
     }
-    prevRemMetersRef.current = remMeters;
 
     setUTurnActive(detectedUTurn);
-
-    // ── Map u-turn icon ───────────────────────────────────────────────────
+    // Drive the map u-turn icon
     map.getSource("uturn-src")?.setData({
       type: "FeatureCollection",
       features: detectedUTurn
@@ -846,18 +758,24 @@ export default function CampusGraph() {
         : [],
     });
 
-    // Clear the red arc once the user has actually turned around
-    // (i.e. distance is no longer increasing).
-    if (!detectedUTurn) {
-      map
-        .getSource("uturn-arc-src")
-        ?.setData({ type: "FeatureCollection", features: [] });
-    }
-
-    // ── Trigger reroute when user drifts off-route ────────────────────────
+    // Trigger reroute when user drifts off-route
     if (minD > OFF_ROUTE_THRESHOLD_M) triggerReroute(coords);
 
-    // ── Update map sources ────────────────────────────────────────────────
+    const remaining = [[coords.lng, coords.lat], ...rc.slice(closestIdx)];
+    const travelled = [
+      ...rc.slice(0, closestIdx + 1),
+      [coords.lng, coords.lat],
+    ];
+
+    let remMeters = 0;
+    for (let i = 0; i < remaining.length - 1; i++)
+      remMeters += getDistanceInMeters(
+        remaining[i][1],
+        remaining[i][0],
+        remaining[i + 1][1],
+        remaining[i + 1][0],
+      );
+
     map.getSource("route-src")?.setData({
       type: "FeatureCollection",
       features: [
@@ -880,7 +798,6 @@ export default function CampusGraph() {
       type: "FeatureCollection",
       features: buildArrowFeatures(remaining),
     });
-
     setRouteInfo({
       distance: Math.round(remMeters),
       time: Math.max(1, Math.ceil(remMeters / 1.4 / 60)),
@@ -930,7 +847,7 @@ export default function CampusGraph() {
       }
     }
 
-    // ── Auto-follow ───────────────────────────────────────────────────────
+    // Auto-follow: keep map centred on user with forward bearing
     if (remaining.length >= 2 && autoFollowRef.current) {
       const bearing = getBearing(
         remaining[0][1],
@@ -1117,7 +1034,6 @@ export default function CampusGraph() {
       setTravelledIdx(0);
       setStepIdx(0);
       stepIdxRef.current = 0;
-      prevRemMetersRef.current = null; // reset distance tracker
       setRouteInfo({
         distance: Math.round(total),
         time: Math.max(1, Math.ceil(total / 1.4 / 60)),
@@ -1134,9 +1050,6 @@ export default function CampusGraph() {
       if (map) {
         map
           .getSource("route-travelled")
-          ?.setData({ type: "FeatureCollection", features: [] });
-        map
-          .getSource("uturn-arc-src")
           ?.setData({ type: "FeatureCollection", features: [] });
         map.getSource("route-src")?.setData({
           type: "FeatureCollection",
@@ -1181,7 +1094,6 @@ export default function CampusGraph() {
     setSheetOpen(false);
     isReroutingRef.current = false;
     lastRerouteTimeRef.current = 0;
-    prevRemMetersRef.current = null; // reset distance tracker
     const map = mapInstance.current;
     if (map && coords)
       map.easeTo({
@@ -1200,9 +1112,7 @@ export default function CampusGraph() {
     if (navigating) {
       const rc = routeCoordsRef.current;
       const hdg =
-        rc.length >= 2
-          ? getBearing(rc[0][1], rc[0][0], rc[1][1], rc[1][0])
-          : 0;
+        rc.length >= 2 ? getBearing(rc[0][1], rc[0][0], rc[1][1], rc[1][0]) : 0;
       map.easeTo({
         center: [coords.lng, coords.lat],
         zoom: 18.5,
@@ -1241,7 +1151,6 @@ export default function CampusGraph() {
     setIsRerouting(false);
     isReroutingRef.current = false;
     lastRerouteTimeRef.current = 0;
-    prevRemMetersRef.current = null; // reset distance tracker
     autoFollowRef.current = false;
     setPreviewCollapsed(false);
     setIsPreviewMode(false);
@@ -1250,9 +1159,6 @@ export default function CampusGraph() {
     setUTurnActive(false);
     mapInstance.current
       ?.getSource("uturn-src")
-      ?.setData({ type: "FeatureCollection", features: [] });
-    mapInstance.current
-      ?.getSource("uturn-arc-src")
       ?.setData({ type: "FeatureCollection", features: [] });
     if (searchPinRef.current) {
       searchPinRef.current.remove();
@@ -1581,6 +1487,7 @@ export default function CampusGraph() {
         (uTurnActive || dirInfo) &&
         (() => {
           const bannerInfo = uTurnActive ? DIR["u-turn"] : dirInfo;
+
           if (!bannerInfo) return null;
 
           return (
@@ -1633,7 +1540,13 @@ export default function CampusGraph() {
                 </div>
 
                 {distToNextTurn != null && distToNextTurn > 0 && (
-                  <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "#888",
+                      marginTop: 3,
+                    }}
+                  >
                     in {distToNextTurn} m
                   </div>
                 )}
@@ -1703,7 +1616,7 @@ export default function CampusGraph() {
         <StepsPanel />
       )}
 
-      {/* ── FABs ── */}
+      {/* ── FABs — reroute button removed ── */}
       <div
         style={{
           position: "absolute",
@@ -2127,9 +2040,7 @@ export default function CampusGraph() {
             alignItems: "center",
             gap: 7,
             padding: "6px 12px",
-            background: coords
-              ? "rgba(52,168,83,0.12)"
-              : "rgba(234,67,53,0.1)",
+            background: coords ? "rgba(52,168,83,0.12)" : "rgba(234,67,53,0.1)",
             borderRadius: 20,
             border: `1px solid ${coords ? "#34a85340" : "#ea433540"}`,
             fontSize: 11,
