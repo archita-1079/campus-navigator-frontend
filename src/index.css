@@ -167,6 +167,7 @@ body {
   padding: 32px;
   overflow-y: auto;
   background: var(--bg);
+  width: 100%;
 }
 
 .page-header {
@@ -972,4 +973,79 @@ tr:hover td {
 }
 .leaflet-control-attribution a {
   color: #475569 !important;
+}
+/* Layout */
+.layout {
+  display: flex;
+  flex: 1;
+}
+
+/* Header Links (Desktop) */
+.desktop-nav {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.header-link {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text2);
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+.header-link:hover {
+  color: var(--text);
+}
+.header-link.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.header-link.logout {
+  color: var(--danger);
+}
+
+/* Base Sidebar Styling (Hidden on Desktop) */
+.sidebar {
+  display: none; /* Hide left sidebar on laptops */
+  padding: 24px 0;
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  z-index: 1000;
+}
+
+.mobile-toggle {
+  display: none;
+  cursor: pointer;
+  font-size: 24px;
+  color: var(--text1);
+  user-select: none;
+}
+
+/* Mobile Responsive Styles */
+@media (max-width: 768px) {
+  .mobile-toggle {
+    display: block; /* Show hamburger on mobile */
+  }
+
+  .desktop-nav {
+    display: none; /* Hide header links on mobile */
+  }
+
+  /* Activate slide-out sidebar for mobile */
+  .sidebar {
+    display: block; 
+    position: fixed;
+    top: 56px; 
+    left: -100%; 
+    height: calc(100vh - 56px);
+    width: 250px;
+    transition: left 0.3s ease-in-out;
+    box-shadow: 2px 0 10px rgba(0,0,0,0.8);
+  }
+
+  .sidebar.open {
+    left: 0;
+  }
 }

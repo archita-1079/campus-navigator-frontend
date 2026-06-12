@@ -17,7 +17,9 @@ import { API_ADMIN_BASE, NODE_TYPES } from "./utils/constants";
 import axios from "axios";
 
 export default function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(
+    !!localStorage.getItem("token"),
+  );
   const [tab, setTab] = useState("nodes");
   const [nodes, setNodes] = useState([]);
   const [edges, setEdges] = useState([]);
@@ -25,6 +27,7 @@ export default function App() {
   const [edgesLoading, setEdgesLoading] = useState(false);
   const { toasts, error, success, remove } = useToasts();
   const [gpsStatus, setGpsStatus] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const navigate = useNavigate();
 
   const fetchNodes = useCallback(async () => {
@@ -65,6 +68,7 @@ export default function App() {
 
   const handleLogout = () => {
     setIsAuthenticated(false);
+    localStorage.removeItem("token");
     navigate("/");
   };
 
@@ -100,24 +104,61 @@ export default function App() {
       </div>
       <div className="app">
         <header className="header">
-          <div className="header-logo">
-            <div className="header-dot" />
-            Way Finder
+          {/* Left Side: Hamburger (Mobile Only) & Logo */}
+          <div style={{ display: "flex", alignItems: "center", gap: "15px" }}>
+            <div 
+              className="mobile-toggle" 
+              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            >
+              ☰
+            </div>
+            <div className="header-logo">
+              <div className="header-dot" />
+              Way Finder
+            </div>
           </div>
-          <div className="gps-badge">
-            <div className={`gps-dot${gpsStatus ? "" : " inactive"}`} />
-            {gpsStatus ? "GPS READY" : "GPS UNAVAILABLE"}
-          </div>
-        </header>
 
-        <div className="layout">
-          <nav className="sidebar">
-            <div className="sidebar-section">
-              <div className="sidebar-label">Navigation</div>
+          {/* Right Side: Desktop Nav Links & GPS Badge */}
+          <div style={{ display: "flex", alignItems: "center", gap: "24px" }}>
+            <nav className="desktop-nav">
               {navItems.map((item) => (
                 <NavLink
                   key={item.id}
                   to={item.path}
+                  className={({ isActive }) =>
+                    `header-link${isActive ? " active" : ""}`
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+              {isAuthenticated && (
+                <div
+                  className="header-link logout"
+                  onClick={handleLogout}
+                >
+                  Logout
+                </div>
+              )}
+            </nav>
+
+            <div className="gps-badge">
+              <div className={`gps-dot${gpsStatus ? "" : " inactive"}`} />
+              {gpsStatus ? "GPS READY" : "GPS UNAVAILABLE"}
+            </div>
+          </div>
+        </header>
+
+        <div className="layout">
+          {/* Sidebar now ONLY acts as a mobile slide-out menu */}
+          <nav className={`sidebar ${isSidebarOpen ? "open" : ""}`}>
+            <div className="sidebar-section">
+              <div className="sidebar-label">Menu</div>
+              {navItems.map((item) => (
+                <NavLink
+                  key={item.id}
+                  to={item.path}
+                  onClick={() => setIsSidebarOpen(false)}
                   className={({ isActive }) =>
                     `nav-item${isActive ? " active" : ""}`
                   }
@@ -128,12 +169,11 @@ export default function App() {
               {isAuthenticated && (
                 <div
                   className="nav-item"
-                  onClick={handleLogout}
-                  style={{
-                    cursor: "pointer",
-                    marginTop: "10px",
-                    color: "var(--accent)",
+                  onClick={() => {
+                    handleLogout();
+                    setIsSidebarOpen(false);
                   }}
+                  style={{ cursor: "pointer", marginTop: "10px", color: "var(--danger)" }}
                 >
                   <span className="nav-icon">🚪</span> Logout
                 </div>
