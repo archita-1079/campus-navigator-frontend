@@ -25,10 +25,6 @@ const OFF_ROUTE_THRESHOLD_M = 5;
 // Minimum milliseconds between consecutive reroute API calls.
 const REROUTE_COOLDOWN_MS = 1000;
 
-// U-turn detection: remaining distance must increase by ≥1 m in a single
-// GPS tick for a u-turn / wrong-direction to be flagged.
-const UTURN_DISTANCE_DELTA_M = 1;
-
 // ─── OSRM fallback (only when campus graph returns no edges) ──────────────────
 const OSRM_BASE = "https://router.project-osrm.org/route/v1/foot";
 async function fetchOSRMRoute(srcNode, dstNode) {
@@ -43,61 +39,83 @@ async function fetchOSRMRoute(srcNode, dstNode) {
 
 // ─── Build coord array from API edge list ─────────────────────────────────────
 function edgesToCoords(edges, nodes) {
-  const arr = [];
+  if (!edges.length) return [];
+
+  const findNode = (id) => nodes.find((n) => n.id === id);
+
+  // Build a lookup: nodeId pair → edge (both directions)
+  const edgeByPair = new Map();
   edges.forEach((edge) => {
-    const src = nodes.find((n) => n.id === edge.sourceNodeId);
-    const tgt = nodes.find(
-      (n) => n.id === (edge.destinationNodeId ?? edge.targetNodeId),
-    );
-    if (!src || !tgt) return;
-    if (arr.length === 0) arr.push([src.longitude, src.latitude]);
-    (edge.waypoints || []).forEach((w) => arr.push([w.longitude, w.latitude]));
-    arr.push([tgt.longitude, tgt.latitude]);
+    const src = edge.sourceNodeId;
+    const tgt = edge.destinationNodeId ?? edge.targetNodeId;
+    edgeByPair.set(`${src}-${tgt}`, { src, tgt, waypoints: edge.waypoints || [], reverse: false });
+    edgeByPair.set(`${tgt}-${src}`, { src: tgt, tgt: src, waypoints: edge.waypoints || [], reverse: true });
   });
-  return arr;
-}
 
-// ─── Build a smooth Google-Maps-style blue U-turn arc ────────────────────────
-// Returns an array of [lng, lat] points describing a rounded looping curve
-// from `pos` (user position) back toward the first node of the rerouted path.
-// The arc swings perpendicular to the original travel direction so it looks
-// like a proper turning loop rather than a straight reversal.
-function buildUTurnArc(userLng, userLat, nextLng, nextLat) {
-  // Direction vector from user → next node
-  const dx = nextLng - userLng;
-  const dy = nextLat - userLat;
-  const len = Math.sqrt(dx * dx + dy * dy) || 1e-9;
+  // Build adjacency (undirected)
+  const adj = new Map();
+  edges.forEach((edge) => {
+    const src = edge.sourceNodeId;
+    const tgt = edge.destinationNodeId ?? edge.targetNodeId;
+    if (!adj.has(src)) adj.set(src, new Set());
+    if (!adj.has(tgt)) adj.set(tgt, new Set());
+    adj.get(src).add(tgt);
+    adj.get(tgt).add(src);
+  });
 
-  // Unit perpendicular (90° left of travel direction)
-  const px = -dy / len;
-  const py = dx / len;
+  // Find the true start: node that appears as sourceNodeId but never as a targetNodeId
+  const allSrc = new Set(edges.map((e) => e.sourceNodeId));
+  const allTgt = new Set(edges.map((e) => e.destinationNodeId ?? e.targetNodeId));
+  
+  // Degree-1 nodes (endpoints of the path)
+  const endpoints = [...adj.entries()]
+    .filter(([, neighbors]) => neighbors.size === 1)
+    .map(([id]) => id);
 
-  // Arc radius in degrees — ~8 m at campus latitude
-  const r = 0.00008;
+  // Pick the endpoint that was a source in the API response (the real start)
+  let startId = endpoints.find((id) => allSrc.has(id) && !allTgt.has(id));
+  // Fallback: any endpoint that appears as a source
+  if (!startId) startId = endpoints.find((id) => allSrc.has(id));
+  // Fallback: any endpoint
+  if (!startId) startId = endpoints[0];
+  // Last resort: first source
+  if (!startId) startId = edges[0].sourceNodeId;
 
-  // Centre of the turning circle: offset perpendicular from the midpoint
-  // between user and next node, scaled so the arc is snug.
-  const mx = (userLng + nextLng) / 2;
-  const my = (userLat + nextLat) / 2;
-  const cx = mx + px * r * 2.2;
-  const cy = my + py * r * 2.2;
+  // Walk the path — at each step, prefer the neighbor we haven't visited
+  // and that leads toward the other endpoint (avoid backtracking)
+  const visited = new Set();
+  const arr = [];
+  let currentId = startId;
 
-  // Angles from centre to the two endpoints
-  const a0 = Math.atan2(userLat - cy, userLng - cx);
-  const a1 = Math.atan2(nextLat - cy, nextLng - cx);
+  while (currentId != null) {
+    visited.add(currentId);
+    const node = findNode(currentId);
+    if (!node) break;
 
-  // Always sweep the "long way round" (> 180°) so we get a loop
-  let sweep = a1 - a0;
-  if (Math.abs(sweep) < Math.PI) sweep += sweep > 0 ? -2 * Math.PI : 2 * Math.PI;
+    arr.push([node.longitude, node.latitude]);
 
-  // Sample 24 points along the arc for a silky-smooth curve
-  const pts = [];
-  const steps = 24;
-  for (let i = 0; i <= steps; i++) {
-    const a = a0 + (sweep * i) / steps;
-    pts.push([cx + r * 2.2 * Math.cos(a), cy + r * 2.2 * Math.sin(a)]);
+    const neighbors = [...(adj.get(currentId) || [])].filter((nb) => !visited.has(nb));
+    if (!neighbors.length) break;
+
+    // If multiple unvisited neighbors (junction), prefer the one with higher
+    // degree (keeps us on the main path, not a dead-end branch)
+    neighbors.sort((a, b) => (adj.get(b)?.size ?? 0) - (adj.get(a)?.size ?? 0));
+    const nextId = neighbors[0];
+
+    // Insert waypoints in correct direction
+    const key = `${currentId}-${nextId}`;
+    const edgeData = edgeByPair.get(key);
+    if (edgeData) {
+      const wps = edgeData.reverse
+        ? [...edgeData.waypoints].reverse()
+        : edgeData.waypoints;
+      wps.forEach((w) => arr.push([w.longitude, w.latitude]));
+    }
+
+    currentId = nextId;
   }
-  return pts; // [lng, lat][]
+
+  return arr;
 }
 
 // ─── Compass heading hook ─────────────────────────────────────────────────────
@@ -162,12 +180,6 @@ export default function CampusGraph() {
   const selectedDestRef = useRef(null);
   const mapDataRef = useRef({ nodes: [], edges: [] });
 
-  // distance tracking for u-turn detection
-  const prevRemMetersRef = useRef(null);
-  // when a u-turn arc is showing, remember its coords so we can clear it
-  // only once the user has rejoined the correct path
-  const uTurnArcCoordsRef = useRef(null);
-
   const [mapData, setMapData] = useState({ nodes: [], edges: [] });
 
   const { coords, error: gpsError } = use1sGPS();
@@ -207,7 +219,6 @@ export default function CampusGraph() {
   const [isPreviewMode, setIsPreviewMode] = useState(false);
   const [showStepsPanel, setShowStepsPanel] = useState(false);
   const [distToNextTurn, setDistToNextTurn] = useState(null);
-  const [uTurnActive, setUTurnActive] = useState(false);
 
   // keep refs in sync
   useEffect(() => { routeCoordsRef.current = routeCoords; }, [routeCoords]);
@@ -291,7 +302,6 @@ export default function CampusGraph() {
           "circle-stroke-color": "rgba(66,133,244,0.45)",
           "circle-stroke-width": 1.5,
           "circle-pitch-alignment": "map",
-          // Fixed 5 m radius display — matches the new OFF_ROUTE_THRESHOLD_M
           "circle-radius": {
             stops: [
               [14, 4],
@@ -356,26 +366,6 @@ export default function CampusGraph() {
         paint: { "line-color": "#4285F4", "line-width": 7, "line-opacity": 1 },
       });
 
-      // ── U-turn arc — Google-Maps-style BLUE looping curve ─────────────────
-      // Rendered on a separate source so it can be toggled independently.
-      // Casing (dark blue outline) + fill (bright blue) mimic the main route
-      // style so the arc feels like a natural extension of the path.
-      addSrc("uturn-arc-src");
-      map.addLayer({
-        id: "uturn-arc-casing",
-        type: "line",
-        source: "uturn-arc-src",
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#0d47a1", "line-width": 13, "line-opacity": 0.9 },
-      });
-      map.addLayer({
-        id: "uturn-arc-fill",
-        type: "line",
-        source: "uturn-arc-src",
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": "#4285F4", "line-width": 7, "line-opacity": 1 },
-      });
-
       // ── Direction arrows ──────────────────────────────────────────────────
       addSrc("arrows-src");
       map.addLayer({
@@ -395,25 +385,6 @@ export default function CampusGraph() {
           "text-halo-color": "#1a56c4",
           "text-halo-width": 1.5,
           "text-opacity": 0.9,
-        },
-      });
-
-      // ── U-turn symbol icon ────────────────────────────────────────────────
-      addSrc("uturn-src");
-      map.addLayer({
-        id: "uturn-layer",
-        type: "symbol",
-        source: "uturn-src",
-        layout: {
-          "text-field": "↺",
-          "text-size": 32,
-          "text-allow-overlap": true,
-          "text-ignore-placement": true,
-        },
-        paint: {
-          "text-color": "#4285F4",
-          "text-halo-color": "#fff",
-          "text-halo-width": 2.5,
         },
       });
 
@@ -605,34 +576,6 @@ export default function CampusGraph() {
     }
   }, [coords, compassHeading, buildHeadingCone]);
 
-  // ── Helper: draw the blue u-turn arc on the map ───────────────────────────
-  const showUTurnArc = useCallback((map, userLng, userLat, nextLng, nextLat) => {
-    const arcPts = buildUTurnArc(userLng, userLat, nextLng, nextLat);
-    uTurnArcCoordsRef.current = arcPts;
-    map.getSource("uturn-arc-src")?.setData({
-      type: "FeatureCollection",
-      features: [{
-        type: "Feature",
-        geometry: { type: "LineString", coordinates: arcPts },
-      }],
-    });
-    // Blue ↺ icon at the user position
-    map.getSource("uturn-src")?.setData({
-      type: "FeatureCollection",
-      features: [{
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [userLng, userLat] },
-        properties: {},
-      }],
-    });
-  }, []);
-
-  const clearUTurnArc = useCallback((map) => {
-    uTurnArcCoordsRef.current = null;
-    map.getSource("uturn-arc-src")?.setData({ type: "FeatureCollection", features: [] });
-    map.getSource("uturn-src")?.setData({ type: "FeatureCollection", features: [] });
-  }, []);
-
   // ── Reroute ───────────────────────────────────────────────────────────────
   const triggerReroute = useCallback(async (currentCoords) => {
     if (isReroutingRef.current) return;
@@ -671,18 +614,12 @@ export default function CampusGraph() {
       arr.unshift([currentCoords.lng, currentCoords.lat]);
       if (arr.length < 2) return;
 
-      // ── Draw the blue U-turn arc connecting user pos → first route node ──
-      const map = mapInstance.current;
-      if (map && arr.length >= 2) {
-        showUTurnArc(map, arr[0][0], arr[0][1], arr[1][0], arr[1][1]);
-      }
-
-      // Measure total length (straight segments, arc is cosmetic only)
+      // Measure total length
       let total = 0;
       for (let i = 0; i < arr.length - 1; i++)
         total += getDistanceInMeters(arr[i][1], arr[i][0], arr[i + 1][1], arr[i + 1][0]);
 
-      const built = buildDirections(arr, true);
+      const built = buildDirections(arr);
       setRouteCoords(arr);
       routeCoordsRef.current = arr;
       setDirections(built);
@@ -691,16 +628,14 @@ export default function CampusGraph() {
       setStepIdx(0);
       stepIdxRef.current = 0;
       setDistToNextTurn(null);
-      // Reset distance tracker — don't fire another u-turn on the first new tick
-      prevRemMetersRef.current = null;
       setRouteInfo({
         distance: Math.round(total),
         time: Math.max(1, Math.ceil(total / 1.4 / 60)),
       });
 
+      const map = mapInstance.current;
       if (map) {
         map.getSource("route-travelled")?.setData({ type: "FeatureCollection", features: [] });
-        // Highlight the new shortest path in the standard blue route style
         map.getSource("route-src")?.setData({
           type: "FeatureCollection",
           features: [{
@@ -719,7 +654,7 @@ export default function CampusGraph() {
       isReroutingRef.current = false;
       setIsRerouting(false);
     }
-  }, [showUTurnArc]);
+  }, []);
 
   // ── Navigation tracking — runs every GPS tick (≈1 s) ─────────────────────
   useEffect(() => {
@@ -748,34 +683,7 @@ export default function CampusGraph() {
         remaining[i + 1][1], remaining[i + 1][0],
       );
 
-    // ── Distance-based U-turn / wrong-direction detection ─────────────────
-    // Fires when remaining distance INCREASES by ≥ UTURN_DISTANCE_DELTA_M (1 m)
-    // compared to the last tick.  We guard against the last few metres near
-    // the destination where GPS wobble can falsely increase the reading.
-    let detectedUTurn = false;
-    if (
-      prevRemMetersRef.current !== null &&
-      remMeters > 10 && // ignore near-destination noise
-      remMeters > prevRemMetersRef.current + UTURN_DISTANCE_DELTA_M
-    ) {
-      detectedUTurn = true;
-    }
-    prevRemMetersRef.current = remMeters;
-
-    setUTurnActive(detectedUTurn);
-
-    if (detectedUTurn) {
-      // Show the blue arc at the current position pointing toward next node
-      const nextPt = rc[Math.min(closestIdx + 1, rc.length - 1)];
-      showUTurnArc(map, coords.lng, coords.lat, nextPt[0], nextPt[1]);
-      // Immediately request a fresh shortest path
-      triggerReroute(coords);
-    } else if (!isReroutingRef.current) {
-      // Once the user is back on course, clear the arc
-      clearUTurnArc(map);
-    }
-
-    // ── Off-route check (5 m radius) ──────────────────────────────────────
+    // ── Off-route check (5 m radius) — triggers reroute ───────────────────
     if (minD > OFF_ROUTE_THRESHOLD_M) triggerReroute(coords);
 
     // ── Update map sources ────────────────────────────────────────────────
@@ -831,7 +739,7 @@ export default function CampusGraph() {
       const bearing = getBearing(remaining[0][1], remaining[0][0], remaining[1][1], remaining[1][0]);
       map.easeTo({ center: [coords.lng, coords.lat], bearing, zoom: 18.5, pitch: 45, duration: 700 });
     }
-  }, [coords, navigating, triggerReroute, showUTurnArc, clearUTurnArc]);
+  }, [coords, navigating, triggerReroute]);
 
   // ── Fly to node ───────────────────────────────────────────────────────────
   const flyToNode = (node) => {
@@ -871,7 +779,7 @@ export default function CampusGraph() {
     try {
       const res = await axios.get(`${API_USER_BASE}/node/search?query=${query}`);
       const filtered = (res.data.data || []).filter((n) =>
-        ["OTHER", "BUILDING", "CLASSROOM", "LECTURE_HALL"].includes(n.nodeType?.toUpperCase()),
+        ["OTHER", "BUILDING", "CLASSROOM", "LECTURE_HALL","LAB"].includes(n.nodeType?.toUpperCase()),
       );
       isSource ? setSourceResults(filtered) : setDestResults(filtered);
     } catch (e) { console.error(e); }
@@ -936,7 +844,6 @@ export default function CampusGraph() {
       setTravelledIdx(0);
       setStepIdx(0);
       stepIdxRef.current = 0;
-      prevRemMetersRef.current = null;
       setRouteInfo({ distance: Math.round(total), time: Math.max(1, Math.ceil(total / 1.4 / 60)) });
       setRouteReady(true);
       setNavigating(false);
@@ -949,8 +856,6 @@ export default function CampusGraph() {
       const map = mapInstance.current;
       if (map) {
         map.getSource("route-travelled")?.setData({ type: "FeatureCollection", features: [] });
-        map.getSource("uturn-arc-src")?.setData({ type: "FeatureCollection", features: [] });
-        map.getSource("uturn-src")?.setData({ type: "FeatureCollection", features: [] });
         map.getSource("route-src")?.setData({
           type: "FeatureCollection",
           features: [{ type: "Feature", geometry: { type: "LineString", coordinates: arr } }],
@@ -980,7 +885,6 @@ export default function CampusGraph() {
     setSheetOpen(false);
     isReroutingRef.current = false;
     lastRerouteTimeRef.current = 0;
-    prevRemMetersRef.current = null;
     const map = mapInstance.current;
     if (map && coords)
       map.easeTo({ center: [coords.lng, coords.lat], zoom: 18.5, pitch: 45, duration: 1200 });
@@ -1013,16 +917,13 @@ export default function CampusGraph() {
     setIsRerouting(false);
     isReroutingRef.current = false;
     lastRerouteTimeRef.current = 0;
-    prevRemMetersRef.current = null;
-    uTurnArcCoordsRef.current = null;
     autoFollowRef.current = false;
     setPreviewCollapsed(false); setIsPreviewMode(false);
     setShowStepsPanel(false); setDistToNextTurn(null);
-    setUTurnActive(false);
     if (searchPinRef.current) { searchPinRef.current.remove(); searchPinRef.current = null; }
     const map = mapInstance.current;
     if (map) {
-      ["route-src", "route-travelled", "arrows-src", "uturn-arc-src", "uturn-src"]
+      ["route-src", "route-travelled", "arrows-src"]
         .forEach((s) => map.getSource(s)?.setData({ type: "FeatureCollection", features: [] }));
       map.easeTo({ zoom: 17, pitch: 0, bearing: 0, duration: 800 });
     }
@@ -1208,39 +1109,35 @@ export default function CampusGraph() {
       )}
 
       {/* ── Live turn banner ── */}
-      {navigating && !arrived && !isRerouting && (uTurnActive || dirInfo) && (() => {
-        const bannerInfo = uTurnActive ? DIR["u-turn"] : dirInfo;
-        if (!bannerInfo) return null;
-        return (
+      {navigating && !arrived && !isRerouting && dirInfo && (
+        <div style={{
+          position: "absolute", top: 16, left: 12, right: 12, zIndex: 25, marginTop: 50,
+          animation: "dirSlide 0.3s ease",
+          background: "rgba(10,10,10,0.97)",
+          border: `2.5px solid ${dirInfo.color}`,
+          borderRadius: 18, padding: "13px 16px",
+          display: "flex", alignItems: "center", gap: 13,
+          boxShadow: "0 6px 28px rgba(0,0,0,0.7)", backdropFilter: "blur(14px)",
+        }}>
           <div style={{
-            position: "absolute", top: 16, left: 12, right: 12, zIndex: 25, marginTop: 50,
-            animation: "dirSlide 0.3s ease",
-            background: "rgba(10,10,10,0.97)",
-            border: `2.5px solid ${bannerInfo.color}`,
-            borderRadius: 18, padding: "13px 16px",
-            display: "flex", alignItems: "center", gap: 13,
-            boxShadow: "0 6px 28px rgba(0,0,0,0.7)", backdropFilter: "blur(14px)",
-          }}>
-            <div style={{
-              width: 50, height: 50, borderRadius: 13,
-              background: `${bannerInfo.color}18`, border: `2px solid ${bannerInfo.color}`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 26, flexShrink: 0,
-            }}>{bannerInfo.icon}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 16, fontWeight: 700, color: bannerInfo.color }}>
-                {bannerInfo.label}
-              </div>
-              {distToNextTurn != null && distToNextTurn > 0 && (
-                <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
-                  in {distToNextTurn} m
-                </div>
-              )}
+            width: 50, height: 50, borderRadius: 13,
+            background: `${dirInfo.color}18`, border: `2px solid ${dirInfo.color}`,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 26, flexShrink: 0,
+          }}>{dirInfo.icon}</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: dirInfo.color }}>
+              {dirInfo.label}
             </div>
-            <div style={{ fontSize: 10, color: "#555" }}>{stepIdx + 1} / {directions.length}</div>
+            {distToNextTurn != null && distToNextTurn > 0 && (
+              <div style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+                in {distToNextTurn} m
+              </div>
+            )}
           </div>
-        );
-      })()}
+          <div style={{ fontSize: 10, color: "#555" }}>{stepIdx + 1} / {directions.length}</div>
+        </div>
+      )}
 
       {/* ── Arrived ── */}
       {arrived && (

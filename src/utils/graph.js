@@ -108,16 +108,9 @@ function smoothedBearing(coords, fromIdx) {
 }
 
 // ─── buildDirections ─────────────────────────────────────────────────────────
-// U-turns ARE allowed — they appear when the graph genuinely doubles back
-// (e.g. after a reroute prepends the live GPS position) or when the user
-// has walked away from the route and a new path requires reversing.
 const MIN_STEP_DIST = 8;
 
-// allowUTurn should be true ONLY when the route was freshly prepended with the
-// user's live GPS position (i.e. after an automatic reroute). Static graph
-// paths from the API never genuinely require a 180° reversal — any apparent
-// U-turn there is a data artefact from waypoint clustering.
-export const buildDirections = (coords, allowUTurn = false) => {
+export const buildDirections = (coords) => {
   if (coords.length < 2) return [];
 
   const steps = [];
@@ -153,11 +146,8 @@ export const buildDirections = (coords, allowUTurn = false) => {
     const nextBearing = smoothedBearing(coords, i + 1);
     const turn = getTurnDirection(segBearing, nextBearing);
 
-    if (turn === "straight") continue;
-
-    // Suppress U-turns from static graph data — they are always artefacts.
-    // Only allow them when the caller confirms a live GPS prepend was done.
-    if (turn === "u-turn" && !allowUTurn) continue;
+    // Skip straight segments and u-turns (u-turns are never shown as steps)
+    if (turn === "straight" || turn === "u-turn") continue;
 
     steps.push({
       type: turn,
@@ -205,7 +195,6 @@ export const DIR = {
   straight: { icon: "↑", label: "Continue straight", color: "#4285F4" },
   right:    { icon: "→", label: "Turn right",         color: "#FBBC05" },
   left:     { icon: "←", label: "Turn left",          color: "#FBBC05" },
-  "u-turn": { icon: "c", label: "Make a U-turn",      color: "#EA4335" },
   arrive:   { icon: "🏁", label: "You have arrived",   color: "#34A853" },
 };
 
