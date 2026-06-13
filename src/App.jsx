@@ -114,7 +114,7 @@ export default function App() {
             </div>
             <div className="header-logo">
               <div className="header-dot" />
-              Way Finder
+              Campus Navigator
             </div>
           </div>
 
