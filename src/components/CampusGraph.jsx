@@ -355,7 +355,9 @@ export default function CampusGraph() {
 
   const handleFindRoute = async () => {
     if (!selectedDest) { alert("Please select a destination!"); return; }
-
+    
+    if (selectedDest.id == selectedSource?.id) { alert("Source and Destination is the same."); return; }
+    
     let activeSource = selectedSource;
     let usingGPS = false;
 
@@ -383,7 +385,9 @@ export default function CampusGraph() {
 
     setIsSearching(true);
     try {
-      const res = await axios.get(`${API_USER_BASE}/graph/shortest-path/${activeSource.id}/${selectedDest.id}`);
+      const res = await axios.get(
+        `${API_USER_BASE}/graph/shortest-path/${activeSource.id}/${selectedDest.id}`,
+      );
       const edges = res.data.data || [];
       let arr = edgesToCoords(edges, mapData.nodes);
 
@@ -421,13 +425,18 @@ export default function CampusGraph() {
       const map = mapInstance.current;
       if (map) {
         map.getSource("route-travelled")?.setData({ type: "FeatureCollection", features: [] });
-        map.getSource("route-src")?.setData({ type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "LineString", coordinates: arr } }] });
-        map.getSource("arrows-src")?.setData({ type: "FeatureCollection", features: buildArrowFeatures(arr) });
+        map.getSource("route-src")?.setData({
+          type: "FeatureCollection",
+          features: [{ type: "Feature", geometry: { type: "LineString", coordinates: arr } }],
+        });
+        map.getSource("arrows-src")?.setData({
+          type: "FeatureCollection", features: buildArrowFeatures(arr),
+        });
         const lngs = arr.map((c) => c[0]);
         const lats = arr.map((c) => c[1]);
         map.fitBounds(
           [[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]],
-          { padding: { top: 80, bottom: 220, left: 40, right: 40 }, pitch: 0, bearing: 0, duration: 1800 }
+          { padding: { top: 80, bottom: 220, left: 40, right: 40 }, pitch: 0, bearing: 0, duration: 1800 },
         );
       }
     } catch (e) {
@@ -437,6 +446,7 @@ export default function CampusGraph() {
       setIsSearching(false);
     }
   };
+
 
   const handleStartNavigation = () => {
     setNavigating(true);
